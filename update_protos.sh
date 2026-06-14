@@ -45,8 +45,9 @@ done
 
 echo "[3/3] Generating Nanopb C code..."
 # Use the generator defined in the Makefile environment
-nanopb_generator --output-dir="$PROTO_DIR" -I "$PROTO_DIR" \
+nanopb_generator --verbose --output-dir="$PROTO_DIR" -I "$PROTO_DIR" \
     "$PROTO_DIR/api.proto" \
-    "$PROTO_DIR/api_options.proto"
+    "$PROTO_DIR/api_options.proto" || \
+    (echo "Protobuf generation failed. Check if 'nanopb' is installed in your pythonenv."; exit 1)
 
 echo "=== DONE ==="

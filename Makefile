@@ -2,10 +2,13 @@ CC = gcc
 TIMESTAMP := $(shell TZ="America/New_York" date +"%Y-%m-%d %H:%M EST")
 MD_FILES := README.md CONTRIBUTING.md ROADMAP.md
 
-CFLAGS = -Wall -Wextra -O2 -Isrc/proto -Isrc -I/usr/local/include -I/usr/include
-LDFLAGS = -L/usr/local/lib -L/usr/local/lib64 -L/usr/lib -L/usr/lib/x86_64-linux-gnu -Wl,-rpath,/usr/local/lib
-# The library produced by building noise-c from source is 'noise-c'
-LIBS = -lnoise-c -lsodium -lm -lpthread
+CFLAGS = -Wall -Wextra -O2 -Isrc/proto -Isrc -I/usr/local/include
+
+# Standard system paths for the installed library
+LDFLAGS = -L/usr/local/lib -Wl,-rpath,/usr/local/lib
+
+# The library produced by building rweather/noise-c from source is named 'libnoise'
+LIBS = -lnoise -lsodium -lm -lpthread
 
 # NanoPB Generator Config (Adjust path to your nanopb installation)
 NANOPB_GEN = nanopb_generator
@@ -54,7 +57,7 @@ $(PROTO_DIR)/%.proto:
 $(PROTO_DIR)/%.pb.c $(PROTO_DIR)/%.pb.h: $(PROTO_DIR)/%.proto
 	@mkdir -p $(PROTO_DIR)
 	@echo "Generating Nanopb files from $<..."
-	@$(NANOPB_GEN) --output-dir=$(PROTO_DIR) -I $(PROTO_DIR) $< 2>/dev/null || \
+	@$(NANOPB_GEN) --output-dir=$(PROTO_DIR) -I $(PROTO_DIR) $< || \
 		(echo "Error: nanopb_generator failed. Ensure 'nanopb' is installed in your pythonenv: pip install nanopb"; exit 1)
 
 update_metadata:
