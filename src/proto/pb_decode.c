@@ -16,6 +16,7 @@
 
 #include "pb.h"
 #include "pb_decode.h"
+#include <stdio.h>
 #include "pb_common.h"
 
 /**************************************
@@ -419,22 +420,28 @@ static bool checkreturn decode_basic_field(pb_istream_t *stream, pb_wire_type_t 
     switch (PB_LTYPE(field->type))
     {
         case PB_LTYPE_BOOL:
-            if (wire_type != PB_WT_VARINT && wire_type != PB_WT_PACKED)
+            if (wire_type != PB_WT_VARINT && wire_type != PB_WT_PACKED) {
+                fprintf(stderr, "[PB_DECODE] Wrong wire type for bool: tag=%d, expected=%d, got=%d\n", field->tag, PB_WT_VARINT, wire_type);
                 PB_RETURN_ERROR(stream, "wrong wire type");
+            }
 
             return pb_dec_bool(stream, field);
 
         case PB_LTYPE_VARINT:
         case PB_LTYPE_UVARINT:
         case PB_LTYPE_SVARINT:
-            if (wire_type != PB_WT_VARINT && wire_type != PB_WT_PACKED)
+            if (wire_type != PB_WT_VARINT && wire_type != PB_WT_PACKED) {
+                fprintf(stderr, "[PB_DECODE] Wrong wire type for varint: tag=%d, got=%d\n", field->tag, wire_type);
                 PB_RETURN_ERROR(stream, "wrong wire type");
+            }
 
             return pb_dec_varint(stream, field);
 
         case PB_LTYPE_FIXED32:
-            if (wire_type != PB_WT_32BIT && wire_type != PB_WT_PACKED)
+            if (wire_type != PB_WT_32BIT && wire_type != PB_WT_PACKED) {
+                fprintf(stderr, "[PB_DECODE] Wrong wire type for fixed32: tag=%d, expected=%d, got=%d\n", field->tag, PB_WT_32BIT, wire_type);
                 PB_RETURN_ERROR(stream, "wrong wire type");
+            }
 
             return pb_decode_fixed32(stream, field->pData);
 
@@ -456,8 +463,10 @@ static bool checkreturn decode_basic_field(pb_istream_t *stream, pb_wire_type_t 
 #endif
 
         case PB_LTYPE_BYTES:
-            if (wire_type != PB_WT_STRING)
+            if (wire_type != PB_WT_STRING) {
+                fprintf(stderr, "[PB_DECODE] Wrong wire type for bytes: tag=%d, got=%d\n", field->tag, wire_type);
                 PB_RETURN_ERROR(stream, "wrong wire type");
+            }
 
             return pb_dec_bytes(stream, field);
 

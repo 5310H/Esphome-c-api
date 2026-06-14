@@ -1,5 +1,7 @@
 syntax = "proto3";
 
+import "api_options.proto";
+
 package esphome.api;
 
 // ============================================================
@@ -11,9 +13,10 @@ message HelloRequest {
 }
 
 message HelloResponse {
-  string server_info = 1;
-  uint32 api_version_major = 2;
-  uint32 api_version_minor = 3;
+  uint32 api_version_major = 1;
+  uint32 api_version_minor = 2;
+  string server_info = 3;
+  string name = 4;
 }
 
 message ConnectRequest {
@@ -22,6 +25,24 @@ message ConnectRequest {
 
 message ConnectResponse {
   bool invalid_password = 1;
+}
+
+message DeviceInfoRequest {
+}
+
+message DeviceInfoResponse {
+  bool uses_password = 1;
+  string name = 2 [(max_data_length) = 31];
+  string mac_address = 3 [(max_data_length) = 17];
+  string esphome_version = 4 [(max_data_length) = 32];
+  string compilation_time = 5 [(max_data_length) = 25];
+  string model = 6 [(max_data_length) = 127];
+  bool has_deep_sleep = 7;
+  string project_name = 8 [(max_data_length) = 127];
+  string project_version = 9 [(max_data_length) = 127];
+  uint32 webserver_port = 10;
+  string manufacturer = 12 [(max_data_length) = 20];
+  string friendly_name = 13 [(max_data_length) = 120];
 }
 
 // ============================================================
@@ -47,11 +68,27 @@ message ListEntitiesResponse {
 
 message SubscribeStatesRequest {}
 
-message EntityState {
+message BinarySensorStateResponse {
   uint32 key = 1;
-  bool state = 2;          // for switches/lights
-  float value = 3;         // for sensors
-  string text = 4;         // for text sensors
+  bool state = 2;
+  bool missing_state = 3;
+}
+
+message SwitchStateResponse {
+  uint32 key = 1;
+  bool state = 2;
+}
+
+message SensorStateResponse {
+  uint32 key = 1;
+  float state = 2;
+  bool missing_state = 3;
+}
+
+message TextSensorStateResponse {
+  uint32 key = 1;
+  string state = 2 [(max_data_length) = 255];
+  bool missing_state = 3;
 }
 
 // ============================================================

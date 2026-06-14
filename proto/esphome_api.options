@@ -4,7 +4,18 @@
 
 esphome.api.HelloRequest.client_info            max_length:64
 esphome.api.HelloResponse.server_info           max_length:64
+esphome.api.HelloResponse.name                  max_length:32
 esphome.api.ConnectRequest.password             max_length:64
+
+esphome.api.DeviceInfoResponse.name             max_length:32
+esphome.api.DeviceInfoResponse.mac_address      max_length:20
+esphome.api.DeviceInfoResponse.esphome_version  max_length:32
+esphome.api.DeviceInfoResponse.compilation_time max_length:32
+esphome.api.DeviceInfoResponse.model            max_length:128
+esphome.api.DeviceInfoResponse.project_name     max_length:128
+esphome.api.DeviceInfoResponse.project_version  max_length:128
+esphome.api.DeviceInfoResponse.manufacturer     max_length:64
+esphome.api.DeviceInfoResponse.friendly_name    max_length:128
 
 # ============================================================
 # Entity listing

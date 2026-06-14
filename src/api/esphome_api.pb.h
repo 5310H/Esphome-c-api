@@ -4,6 +4,7 @@
 #ifndef PB_ESPHOME_API_ESPHOME_API_PB_H_INCLUDED
 #define PB_ESPHOME_API_ESPHOME_API_PB_H_INCLUDED
 #include <pb.h>
+#include "api_options.pb.h"
 
 #if PB_PROTO_HEADER_VERSION != 40
 #error Regenerate this file with the current version of nanopb generator.
@@ -15,9 +16,10 @@ typedef struct _esphome_api_HelloRequest {
 } esphome_api_HelloRequest;
 
 typedef struct _esphome_api_HelloResponse {
-    char server_info[65];
     uint32_t api_version_major;
     uint32_t api_version_minor;
+    char server_info[65];
+    char name[33];
 } esphome_api_HelloResponse;
 
 typedef struct _esphome_api_ConnectRequest {
@@ -27,6 +29,25 @@ typedef struct _esphome_api_ConnectRequest {
 typedef struct _esphome_api_ConnectResponse {
     bool invalid_password;
 } esphome_api_ConnectResponse;
+
+typedef struct _esphome_api_DeviceInfoRequest {
+    char dummy_field;
+} esphome_api_DeviceInfoRequest;
+
+typedef struct _esphome_api_DeviceInfoResponse {
+    bool uses_password;
+    char name[33];
+    char mac_address[21];
+    char esphome_version[33];
+    char compilation_time[33];
+    char model[129];
+    bool has_deep_sleep;
+    char project_name[129];
+    char project_version[129];
+    uint32_t webserver_port;
+    char manufacturer[65];
+    char friendly_name[129];
+} esphome_api_DeviceInfoResponse;
 
 typedef struct _esphome_api_ListEntitiesRequest {
     char dummy_field;
@@ -48,12 +69,28 @@ typedef struct _esphome_api_SubscribeStatesRequest {
     char dummy_field;
 } esphome_api_SubscribeStatesRequest;
 
-typedef struct _esphome_api_EntityState {
+typedef struct _esphome_api_BinarySensorStateResponse {
     uint32_t key;
-    bool state; /* for switches/lights */
-    float value; /* for sensors */
-    char text[129]; /* for text sensors */
-} esphome_api_EntityState;
+    bool state;
+    bool missing_state;
+} esphome_api_BinarySensorStateResponse;
+
+typedef struct _esphome_api_SwitchStateResponse {
+    uint32_t key;
+    bool state;
+} esphome_api_SwitchStateResponse;
+
+typedef struct _esphome_api_SensorStateResponse {
+    uint32_t key;
+    float state;
+    bool missing_state;
+} esphome_api_SensorStateResponse;
+
+typedef struct _esphome_api_TextSensorStateResponse {
+    uint32_t key;
+    pb_callback_t state;
+    bool missing_state;
+} esphome_api_TextSensorStateResponse;
 
 typedef struct _esphome_api_SwitchCommandRequest {
     uint32_t key;
@@ -116,14 +153,19 @@ extern "C" {
 
 /* Initializer values for message structs */
 #define esphome_api_HelloRequest_init_default    {""}
-#define esphome_api_HelloResponse_init_default   {"", 0, 0}
+#define esphome_api_HelloResponse_init_default   {0, 0, "", ""}
 #define esphome_api_ConnectRequest_init_default  {""}
 #define esphome_api_ConnectResponse_init_default {0}
+#define esphome_api_DeviceInfoRequest_init_default {0}
+#define esphome_api_DeviceInfoResponse_init_default {0, "", "", "", "", "", 0, "", "", 0, "", ""}
 #define esphome_api_ListEntitiesRequest_init_default {0}
 #define esphome_api_EntityInfo_init_default      {0, "", "", 0}
 #define esphome_api_ListEntitiesResponse_init_default {0, {esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default, esphome_api_EntityInfo_init_default}}
 #define esphome_api_SubscribeStatesRequest_init_default {0}
-#define esphome_api_EntityState_init_default     {0, 0, 0, ""}
+#define esphome_api_BinarySensorStateResponse_init_default {0, 0, 0}
+#define esphome_api_SwitchStateResponse_init_default {0, 0}
+#define esphome_api_SensorStateResponse_init_default {0, 0, 0}
+#define esphome_api_TextSensorStateResponse_init_default {0, {{NULL}, NULL}, 0}
 #define esphome_api_SwitchCommandRequest_init_default {0, 0}
 #define esphome_api_LightCommandRequest_init_default {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define esphome_api_PingRequest_init_default     {0}
@@ -134,14 +176,19 @@ extern "C" {
 #define esphome_api_LogMessage_init_default      {"", 0, ""}
 #define esphome_api_Frame_init_default           {0, {0, {0}}}
 #define esphome_api_HelloRequest_init_zero       {""}
-#define esphome_api_HelloResponse_init_zero      {"", 0, 0}
+#define esphome_api_HelloResponse_init_zero      {0, 0, "", ""}
 #define esphome_api_ConnectRequest_init_zero     {""}
 #define esphome_api_ConnectResponse_init_zero    {0}
+#define esphome_api_DeviceInfoRequest_init_zero  {0}
+#define esphome_api_DeviceInfoResponse_init_zero {0, "", "", "", "", "", 0, "", "", 0, "", ""}
 #define esphome_api_ListEntitiesRequest_init_zero {0}
 #define esphome_api_EntityInfo_init_zero         {0, "", "", 0}
 #define esphome_api_ListEntitiesResponse_init_zero {0, {esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero, esphome_api_EntityInfo_init_zero}}
 #define esphome_api_SubscribeStatesRequest_init_zero {0}
-#define esphome_api_EntityState_init_zero        {0, 0, 0, ""}
+#define esphome_api_BinarySensorStateResponse_init_zero {0, 0, 0}
+#define esphome_api_SwitchStateResponse_init_zero {0, 0}
+#define esphome_api_SensorStateResponse_init_zero {0, 0, 0}
+#define esphome_api_TextSensorStateResponse_init_zero {0, {{NULL}, NULL}, 0}
 #define esphome_api_SwitchCommandRequest_init_zero {0, 0}
 #define esphome_api_LightCommandRequest_init_zero {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define esphome_api_PingRequest_init_zero        {0}
@@ -154,20 +201,40 @@ extern "C" {
 
 /* Field tags (for use in manual encoding/decoding) */
 #define esphome_api_HelloRequest_client_info_tag 1
-#define esphome_api_HelloResponse_server_info_tag 1
-#define esphome_api_HelloResponse_api_version_major_tag 2
-#define esphome_api_HelloResponse_api_version_minor_tag 3
+#define esphome_api_HelloResponse_api_version_major_tag 1
+#define esphome_api_HelloResponse_api_version_minor_tag 2
+#define esphome_api_HelloResponse_server_info_tag 3
+#define esphome_api_HelloResponse_name_tag       4
 #define esphome_api_ConnectRequest_password_tag  1
 #define esphome_api_ConnectResponse_invalid_password_tag 1
+#define esphome_api_DeviceInfoResponse_uses_password_tag 1
+#define esphome_api_DeviceInfoResponse_name_tag  2
+#define esphome_api_DeviceInfoResponse_mac_address_tag 3
+#define esphome_api_DeviceInfoResponse_esphome_version_tag 4
+#define esphome_api_DeviceInfoResponse_compilation_time_tag 5
+#define esphome_api_DeviceInfoResponse_model_tag 6
+#define esphome_api_DeviceInfoResponse_has_deep_sleep_tag 7
+#define esphome_api_DeviceInfoResponse_project_name_tag 8
+#define esphome_api_DeviceInfoResponse_project_version_tag 9
+#define esphome_api_DeviceInfoResponse_webserver_port_tag 10
+#define esphome_api_DeviceInfoResponse_manufacturer_tag 12
+#define esphome_api_DeviceInfoResponse_friendly_name_tag 13
 #define esphome_api_EntityInfo_key_tag           1
 #define esphome_api_EntityInfo_object_id_tag     2
 #define esphome_api_EntityInfo_name_tag          3
 #define esphome_api_EntityInfo_legacy_type_tag   4
 #define esphome_api_ListEntitiesResponse_entities_tag 1
-#define esphome_api_EntityState_key_tag          1
-#define esphome_api_EntityState_state_tag        2
-#define esphome_api_EntityState_value_tag        3
-#define esphome_api_EntityState_text_tag         4
+#define esphome_api_BinarySensorStateResponse_key_tag 1
+#define esphome_api_BinarySensorStateResponse_state_tag 2
+#define esphome_api_BinarySensorStateResponse_missing_state_tag 3
+#define esphome_api_SwitchStateResponse_key_tag  1
+#define esphome_api_SwitchStateResponse_state_tag 2
+#define esphome_api_SensorStateResponse_key_tag  1
+#define esphome_api_SensorStateResponse_state_tag 2
+#define esphome_api_SensorStateResponse_missing_state_tag 3
+#define esphome_api_TextSensorStateResponse_key_tag 1
+#define esphome_api_TextSensorStateResponse_state_tag 2
+#define esphome_api_TextSensorStateResponse_missing_state_tag 3
 #define esphome_api_SwitchCommandRequest_key_tag 1
 #define esphome_api_SwitchCommandRequest_state_tag 2
 #define esphome_api_LightCommandRequest_key_tag  1
@@ -198,9 +265,10 @@ X(a, STATIC,   SINGULAR, STRING,   client_info,       1)
 #define esphome_api_HelloRequest_DEFAULT NULL
 
 #define esphome_api_HelloResponse_FIELDLIST(X, a) \
-X(a, STATIC,   SINGULAR, STRING,   server_info,       1) \
-X(a, STATIC,   SINGULAR, UINT32,   api_version_major,   2) \
-X(a, STATIC,   SINGULAR, UINT32,   api_version_minor,   3)
+X(a, STATIC,   SINGULAR, UINT32,   api_version_major,   1) \
+X(a, STATIC,   SINGULAR, UINT32,   api_version_minor,   2) \
+X(a, STATIC,   SINGULAR, STRING,   server_info,       3) \
+X(a, STATIC,   SINGULAR, STRING,   name,              4)
 #define esphome_api_HelloResponse_CALLBACK NULL
 #define esphome_api_HelloResponse_DEFAULT NULL
 
@@ -214,13 +282,34 @@ X(a, STATIC,   SINGULAR, BOOL,     invalid_password,   1)
 #define esphome_api_ConnectResponse_CALLBACK NULL
 #define esphome_api_ConnectResponse_DEFAULT NULL
 
+#define esphome_api_DeviceInfoRequest_FIELDLIST(X, a) \
+
+#define esphome_api_DeviceInfoRequest_CALLBACK NULL
+#define esphome_api_DeviceInfoRequest_DEFAULT NULL
+
+#define esphome_api_DeviceInfoResponse_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, BOOL,     uses_password,     1) \
+X(a, STATIC,   SINGULAR, STRING,   name,              2) \
+X(a, STATIC,   SINGULAR, STRING,   mac_address,       3) \
+X(a, STATIC,   SINGULAR, STRING,   esphome_version,   4) \
+X(a, STATIC,   SINGULAR, STRING,   compilation_time,   5) \
+X(a, STATIC,   SINGULAR, STRING,   model,             6) \
+X(a, STATIC,   SINGULAR, BOOL,     has_deep_sleep,    7) \
+X(a, STATIC,   SINGULAR, STRING,   project_name,      8) \
+X(a, STATIC,   SINGULAR, STRING,   project_version,   9) \
+X(a, STATIC,   SINGULAR, UINT32,   webserver_port,   10) \
+X(a, STATIC,   SINGULAR, STRING,   manufacturer,     12) \
+X(a, STATIC,   SINGULAR, STRING,   friendly_name,    13)
+#define esphome_api_DeviceInfoResponse_CALLBACK NULL
+#define esphome_api_DeviceInfoResponse_DEFAULT NULL
+
 #define esphome_api_ListEntitiesRequest_FIELDLIST(X, a) \
 
 #define esphome_api_ListEntitiesRequest_CALLBACK NULL
 #define esphome_api_ListEntitiesRequest_DEFAULT NULL
 
 #define esphome_api_EntityInfo_FIELDLIST(X, a) \
-X(a, STATIC,   SINGULAR, UINT32,   key,               1) \
+X(a, STATIC,   SINGULAR, FIXED32,  key,               1) \
 X(a, STATIC,   SINGULAR, STRING,   object_id,         2) \
 X(a, STATIC,   SINGULAR, STRING,   name,              3) \
 X(a, STATIC,   SINGULAR, UINT32,   legacy_type,       4)
@@ -238,22 +327,41 @@ X(a, STATIC,   REPEATED, MESSAGE,  entities,          1)
 #define esphome_api_SubscribeStatesRequest_CALLBACK NULL
 #define esphome_api_SubscribeStatesRequest_DEFAULT NULL
 
-#define esphome_api_EntityState_FIELDLIST(X, a) \
-X(a, STATIC,   SINGULAR, UINT32,   key,               1) \
+#define esphome_api_BinarySensorStateResponse_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, FIXED32,  key,               1) \
 X(a, STATIC,   SINGULAR, BOOL,     state,             2) \
-X(a, STATIC,   SINGULAR, FLOAT,    value,             3) \
-X(a, STATIC,   SINGULAR, STRING,   text,              4)
-#define esphome_api_EntityState_CALLBACK NULL
-#define esphome_api_EntityState_DEFAULT NULL
+X(a, STATIC,   SINGULAR, BOOL,     missing_state,     3)
+#define esphome_api_BinarySensorStateResponse_CALLBACK NULL
+#define esphome_api_BinarySensorStateResponse_DEFAULT NULL
+
+#define esphome_api_SwitchStateResponse_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, FIXED32,  key,               1) \
+X(a, STATIC,   SINGULAR, BOOL,     state,             2)
+#define esphome_api_SwitchStateResponse_CALLBACK NULL
+#define esphome_api_SwitchStateResponse_DEFAULT NULL
+
+#define esphome_api_SensorStateResponse_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, FIXED32,  key,               1) \
+X(a, STATIC,   SINGULAR, FLOAT,    state,             2) \
+X(a, STATIC,   SINGULAR, BOOL,     missing_state,     3)
+#define esphome_api_SensorStateResponse_CALLBACK NULL
+#define esphome_api_SensorStateResponse_DEFAULT NULL
+
+#define esphome_api_TextSensorStateResponse_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, FIXED32,  key,               1) \
+X(a, CALLBACK, SINGULAR, STRING,   state,             2) \
+X(a, STATIC,   SINGULAR, BOOL,     missing_state,     3)
+#define esphome_api_TextSensorStateResponse_CALLBACK pb_default_field_callback
+#define esphome_api_TextSensorStateResponse_DEFAULT NULL
 
 #define esphome_api_SwitchCommandRequest_FIELDLIST(X, a) \
-X(a, STATIC,   SINGULAR, UINT32,   key,               1) \
+X(a, STATIC,   SINGULAR, FIXED32,  key,               1) \
 X(a, STATIC,   SINGULAR, BOOL,     state,             2)
 #define esphome_api_SwitchCommandRequest_CALLBACK NULL
 #define esphome_api_SwitchCommandRequest_DEFAULT NULL
 
 #define esphome_api_LightCommandRequest_FIELDLIST(X, a) \
-X(a, STATIC,   SINGULAR, UINT32,   key,               1) \
+X(a, STATIC,   SINGULAR, FIXED32,  key,               1) \
 X(a, STATIC,   SINGULAR, BOOL,     has_state,         2) \
 X(a, STATIC,   SINGULAR, BOOL,     state,             3) \
 X(a, STATIC,   SINGULAR, BOOL,     has_brightness,    4) \
@@ -312,11 +420,16 @@ extern const pb_msgdesc_t esphome_api_HelloRequest_msg;
 extern const pb_msgdesc_t esphome_api_HelloResponse_msg;
 extern const pb_msgdesc_t esphome_api_ConnectRequest_msg;
 extern const pb_msgdesc_t esphome_api_ConnectResponse_msg;
+extern const pb_msgdesc_t esphome_api_DeviceInfoRequest_msg;
+extern const pb_msgdesc_t esphome_api_DeviceInfoResponse_msg;
 extern const pb_msgdesc_t esphome_api_ListEntitiesRequest_msg;
 extern const pb_msgdesc_t esphome_api_EntityInfo_msg;
 extern const pb_msgdesc_t esphome_api_ListEntitiesResponse_msg;
 extern const pb_msgdesc_t esphome_api_SubscribeStatesRequest_msg;
-extern const pb_msgdesc_t esphome_api_EntityState_msg;
+extern const pb_msgdesc_t esphome_api_BinarySensorStateResponse_msg;
+extern const pb_msgdesc_t esphome_api_SwitchStateResponse_msg;
+extern const pb_msgdesc_t esphome_api_SensorStateResponse_msg;
+extern const pb_msgdesc_t esphome_api_TextSensorStateResponse_msg;
 extern const pb_msgdesc_t esphome_api_SwitchCommandRequest_msg;
 extern const pb_msgdesc_t esphome_api_LightCommandRequest_msg;
 extern const pb_msgdesc_t esphome_api_PingRequest_msg;
@@ -332,11 +445,16 @@ extern const pb_msgdesc_t esphome_api_Frame_msg;
 #define esphome_api_HelloResponse_fields &esphome_api_HelloResponse_msg
 #define esphome_api_ConnectRequest_fields &esphome_api_ConnectRequest_msg
 #define esphome_api_ConnectResponse_fields &esphome_api_ConnectResponse_msg
+#define esphome_api_DeviceInfoRequest_fields &esphome_api_DeviceInfoRequest_msg
+#define esphome_api_DeviceInfoResponse_fields &esphome_api_DeviceInfoResponse_msg
 #define esphome_api_ListEntitiesRequest_fields &esphome_api_ListEntitiesRequest_msg
 #define esphome_api_EntityInfo_fields &esphome_api_EntityInfo_msg
 #define esphome_api_ListEntitiesResponse_fields &esphome_api_ListEntitiesResponse_msg
 #define esphome_api_SubscribeStatesRequest_fields &esphome_api_SubscribeStatesRequest_msg
-#define esphome_api_EntityState_fields &esphome_api_EntityState_msg
+#define esphome_api_BinarySensorStateResponse_fields &esphome_api_BinarySensorStateResponse_msg
+#define esphome_api_SwitchStateResponse_fields &esphome_api_SwitchStateResponse_msg
+#define esphome_api_SensorStateResponse_fields &esphome_api_SensorStateResponse_msg
+#define esphome_api_TextSensorStateResponse_fields &esphome_api_TextSensorStateResponse_msg
 #define esphome_api_SwitchCommandRequest_fields &esphome_api_SwitchCommandRequest_msg
 #define esphome_api_LightCommandRequest_fields &esphome_api_LightCommandRequest_msg
 #define esphome_api_PingRequest_fields &esphome_api_PingRequest_msg
@@ -348,25 +466,30 @@ extern const pb_msgdesc_t esphome_api_Frame_msg;
 #define esphome_api_Frame_fields &esphome_api_Frame_msg
 
 /* Maximum encoded size of messages (where known) */
+/* esphome_api_TextSensorStateResponse_size depends on runtime parameters */
 #define ESPHOME_API_ESPHOME_API_PB_H_MAX_SIZE    esphome_api_ListEntitiesResponse_size
+#define esphome_api_BinarySensorStateResponse_size 10
 #define esphome_api_ConnectRequest_size          66
 #define esphome_api_ConnectResponse_size         2
+#define esphome_api_DeviceInfoRequest_size       0
+#define esphome_api_DeviceInfoResponse_size      724
 #define esphome_api_DisconnectRequest_size       0
 #define esphome_api_DisconnectResponse_size      0
 #define esphome_api_EntityInfo_size              144
-#define esphome_api_EntityState_size             144
 #define esphome_api_Frame_size                   1033
 #define esphome_api_HelloRequest_size            66
-#define esphome_api_HelloResponse_size           78
+#define esphome_api_HelloResponse_size           112
 #define esphome_api_LightCommandRequest_size     41
 #define esphome_api_ListEntitiesRequest_size     0
 #define esphome_api_ListEntitiesResponse_size    9408
 #define esphome_api_LogMessage_size              331
 #define esphome_api_PingRequest_size             0
 #define esphome_api_PingResponse_size            0
+#define esphome_api_SensorStateResponse_size     13
 #define esphome_api_SubscribeLogsRequest_size    8
 #define esphome_api_SubscribeStatesRequest_size  0
 #define esphome_api_SwitchCommandRequest_size    8
+#define esphome_api_SwitchStateResponse_size     8
 
 #ifdef __cplusplus
 } /* extern "C" */

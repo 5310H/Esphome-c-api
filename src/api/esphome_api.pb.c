@@ -18,6 +18,12 @@ PB_BIND(esphome_api_ConnectRequest, esphome_api_ConnectRequest, AUTO)
 PB_BIND(esphome_api_ConnectResponse, esphome_api_ConnectResponse, AUTO)
 
 
+PB_BIND(esphome_api_DeviceInfoRequest, esphome_api_DeviceInfoRequest, AUTO)
+
+
+PB_BIND(esphome_api_DeviceInfoResponse, esphome_api_DeviceInfoResponse, 2)
+
+
 PB_BIND(esphome_api_ListEntitiesRequest, esphome_api_ListEntitiesRequest, AUTO)
 
 
@@ -30,7 +36,16 @@ PB_BIND(esphome_api_ListEntitiesResponse, esphome_api_ListEntitiesResponse, 4)
 PB_BIND(esphome_api_SubscribeStatesRequest, esphome_api_SubscribeStatesRequest, AUTO)
 
 
-PB_BIND(esphome_api_EntityState, esphome_api_EntityState, AUTO)
+PB_BIND(esphome_api_BinarySensorStateResponse, esphome_api_BinarySensorStateResponse, AUTO)
+
+
+PB_BIND(esphome_api_SwitchStateResponse, esphome_api_SwitchStateResponse, AUTO)
+
+
+PB_BIND(esphome_api_SensorStateResponse, esphome_api_SensorStateResponse, AUTO)
+
+
+PB_BIND(esphome_api_TextSensorStateResponse, esphome_api_TextSensorStateResponse, AUTO)
 
 
 PB_BIND(esphome_api_SwitchCommandRequest, esphome_api_SwitchCommandRequest, AUTO)

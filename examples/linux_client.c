@@ -30,19 +30,29 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    printf("Connected! Subscribing to states...\n");
-    esph_subscribe_states(s);
+    printf("Fetching device info...\n");
+    esph_check_device_info(s);
 
-    // Turn on first switch
-    printf("Turning on switch...\n");
-    esph_set_switch(s, "switch.relay_1", 1);
+    printf("Connected! Listing entities...\n");
+    esph_send_list_entities(s);
+    esph_wait_list_entities_done(s);
 
-    // Wait a bit to see updates or let commands go through
-    #ifdef _WIN32
-    Sleep(2000);
-    #else
-    sleep(2);
-    #endif
+    printf("Subscribing to states...\n");
+    if (esph_subscribe_states(s) != 0) {
+        fprintf(stderr, "Failed to subscribe to states\n");
+        return -1;
+    }
+
+    printf("\nEntering event loop. Waiting for state changes...\n");
+    printf("Press Ctrl+C to exit.\n\n");
+    fflush(stdout);
+    while (1) {
+        if (esph_run_step(s) != 0) {
+            printf("\nDisconnected or error in run loop. Exiting.\n");
+            break;
+        }
+        fflush(stdout);
+    }
 
     printf("Disconnecting...\n");
     esph_disconnect(s);
