@@ -1,0 +1,138 @@
+#include "e131.h"
+#ifdef USE_NETWORK
+#include "e131_addressable_light_effect.h"
+#include "esphome/core/log.h"
+
+#include <algorithm>
+
+namespace esphome::e131 {
+
+static const char *const TAG = "e131";
+static const int PORT = 5568;
+
+E131Component::E131Component() {}
+
+E131Component::~E131Component() {
+#if defined(USE_SOCKET_IMPL_BSD_SOCKETS) || defined(USE_SOCKET_IMPL_LWIP_SOCKETS)
+  if (this->socket_) {
+    this->socket_->close();
+  }
+#elif defined(USE_SOCKET_IMPL_LWIP_TCP)
+  this->udp_.stop();
+#endif
+}
+
+void E131Component::setup() {
+#if defined(USE_SOCKET_IMPL_BSD_SOCKETS) || defined(USE_SOCKET_IMPL_LWIP_SOCKETS)
+  this->socket_ = socket::socket_ip(SOCK_DGRAM, IPPROTO_IP);
+
+  int enable = 1;
+  int err = this->socket_->setsockopt(SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int));
+  if (err != 0) {
+    ESP_LOGW(TAG, "Socket unable to set reuseaddr: errno %d", err);
+    // we can still continue
+  }
+  err = this->socket_->setblocking(false);
+  if (err != 0) {
+    ESP_LOGW(TAG, "Socket unable to set nonblocking mode: errno %d", err);
+    this->mark_failed();
+    return;
+  }
+
+  struct sockaddr_storage server;
+
+  socklen_t sl = socket::set_sockaddr_any((struct sockaddr *) &server, sizeof(server), PORT);
+  if (sl == 0) {
+    ESP_LOGW(TAG, "Socket unable to set sockaddr: errno %d", errno);
+    this->mark_failed();
+    return;
+  }
+
+  err = this->socket_->bind((struct sockaddr *) &server, sizeof(server));
+  if (err != 0) {
+    ESP_LOGW(TAG, "Socket unable to bind: errno %d", errno);
+    this->mark_failed();
+    return;
+  }
+#elif defined(USE_SOCKET_IMPL_LWIP_TCP)
+  if (!this->udp_.begin(PORT)) {
+    ESP_LOGW(TAG, "Cannot bind E1.31 to port %d.", PORT);
+    this->mark_failed();
+    return;
+  }
+#endif
+
+  join_igmp_groups_();
+}
+
+void E131Component::loop() {
+  E131Packet packet;
+  int universe = 0;
+  uint8_t buf[1460];
+  ssize_t len;
+
+  // Drain all queued packets so multi-universe frames are applied
+  // atomically before the light writes. Without this, each universe
+  // packet would trigger a separate full-strip write causing tearing.
+  while ((len = this->read_(buf, sizeof(buf))) > 0) {
+    if (!this->packet_(buf, (size_t) len, universe, packet)) {
+      ESP_LOGV(TAG, "Invalid packet received of size %d.", (int) len);
+      continue;
+    }
+
+    if (!this->process_(universe, packet)) {
+      ESP_LOGV(TAG, "Ignored packet for %d universe of size %d.", universe, packet.count);
+    }
+  }
+}
+
+void E131Component::add_effect(E131AddressableLightEffect *light_effect) {
+  if (std::find(light_effects_.begin(), light_effects_.end(), light_effect) != light_effects_.end()) {
+    return;
+  }
+
+  auto effect_name = light_effect->get_name();
+  ESP_LOGD(TAG, "Registering '%.*s' for universes %d-%d.", (int) effect_name.size(), effect_name.c_str(),
+           light_effect->get_first_universe(), light_effect->get_last_universe());
+
+  light_effects_.push_back(light_effect);
+
+  for (auto universe = light_effect->get_first_universe(); universe <= light_effect->get_last_universe(); ++universe) {
+    join_(universe);
+  }
+}
+
+void E131Component::remove_effect(E131AddressableLightEffect *light_effect) {
+  auto it = std::find(light_effects_.begin(), light_effects_.end(), light_effect);
+  if (it == light_effects_.end()) {
+    return;
+  }
+
+  auto effect_name = light_effect->get_name();
+  ESP_LOGD(TAG, "Unregistering '%.*s' for universes %d-%d.", (int) effect_name.size(), effect_name.c_str(),
+           light_effect->get_first_universe(), light_effect->get_last_universe());
+
+  // Swap with last element and pop for O(1) removal (order doesn't matter)
+  *it = light_effects_.back();
+  light_effects_.pop_back();
+
+  for (auto universe = light_effect->get_first_universe(); universe <= light_effect->get_last_universe(); ++universe) {
+    leave_(universe);
+  }
+}
+
+bool E131Component::process_(int universe, const E131Packet &packet) {
+  bool handled = false;
+
+  ESP_LOGV(TAG, "Received E1.31 packet for %d universe, with %d bytes", universe, packet.count);
+
+  for (auto *light_effect : light_effects_) {
+    handled = light_effect->process_(universe, packet) || handled;
+  }
+
+  return handled;
+}
+
+}  // namespace esphome::e131
+
+#endif

@@ -1,0 +1,101 @@
+from __future__ import annotations
+
+# Helper script and aioesphomeapi to view logs from an esphome device
+import argparse
+import asyncio
+import contextlib
+from datetime import datetime
+import logging
+import sys
+from typing import TYPE_CHECKING
+
+from .client import APIClient
+from .log_parser import parse_log_message
+from .log_runner import async_run
+
+if TYPE_CHECKING:
+    from .api_pb2 import SubscribeLogsResponse  # type: ignore[attr-defined]
+
+
+async def main(argv: list[str]) -> None:
+    parser = argparse.ArgumentParser("aioesphomeapi-logs")
+    parser.add_argument("--port", type=int, default=6053)
+    parser.add_argument("--password", type=str)
+    parser.add_argument("--noise-psk", type=str)
+    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument(
+        "--no-states",
+        action="store_true",
+        help="Do not show entity state changes in log output.",
+    )
+    parser.add_argument(
+        "--allow-plaintext-fallback",
+        action="store_true",
+        help=(
+            "If --noise-psk is set and the device is running plaintext "
+            "firmware, downgrade to plaintext (with a warning) instead of "
+            "failing repeatedly."
+        ),
+    )
+    parser.add_argument(
+        "--strip-ansi-escapes",
+        action="store_true",
+        help=(
+            "Strip ANSI escape sequences (colors, cursor moves) from log "
+            "output. Useful when piping to a file or to a terminal that "
+            "doesn't render them."
+        ),
+    )
+    parser.add_argument("address")
+    args = parser.parse_args(argv[1:])
+
+    logging.basicConfig(
+        format="%(asctime)s.%(msecs)03d %(levelname)-8s %(message)s",
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    cli = APIClient(
+        args.address,
+        args.port,
+        password=args.password,
+        noise_psk=args.noise_psk,
+        keepalive=10,
+    )
+
+    def on_log(msg: SubscribeLogsResponse) -> None:
+        time_ = datetime.now().astimezone()
+        message: bytes = msg.message
+        text = message.decode("utf8", "backslashreplace")
+        milliseconds = time_.microsecond // 1000
+        timestamp = (
+            f"[{time_.hour:02}:{time_.minute:02}:{time_.second:02}.{milliseconds:03}]"
+        )
+
+        # Parse and print the log message
+        for line in parse_log_message(
+            text, timestamp, strip_ansi_escapes=args.strip_ansi_escapes
+        ):
+            print(line)
+
+    stop = await async_run(
+        cli,
+        on_log,
+        subscribe_states=not args.no_states,
+        allow_plaintext_fallback=args.allow_plaintext_fallback,
+    )
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await stop()
+
+
+def cli_entry_point() -> None:
+    """Run the CLI."""
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(main(sys.argv))
+
+
+if __name__ == "__main__":
+    cli_entry_point()
+    sys.exit(0)

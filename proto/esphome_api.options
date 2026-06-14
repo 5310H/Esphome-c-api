@@ -41,4 +41,6 @@ esphome.api.LogMessage.tag                      max_length:64
 # ============================================================
 
 # ESPHome frames can be large; 1024 is safe for nanopb
-esphome.api.Frame.payload                       max_length:1024
+esphome.api.Frame.payload                       max_size:1024
+
+

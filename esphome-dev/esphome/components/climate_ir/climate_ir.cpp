@@ -1,0 +1,102 @@
+#include "climate_ir.h"
+#include "esphome/core/log.h"
+
+namespace esphome::climate_ir {
+
+static const char *const TAG = "climate_ir";
+
+climate::ClimateTraits ClimateIR::traits() {
+  auto traits = climate::ClimateTraits();
+  if (this->sensor_ != nullptr) {
+    traits.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE);
+  }
+  if (this->humidity_sensor_ != nullptr) {
+    traits.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_HUMIDITY);
+  }
+  traits.set_supported_modes({climate::CLIMATE_MODE_OFF, climate::CLIMATE_MODE_HEAT_COOL});
+  if (this->supports_cool_)
+    traits.add_supported_mode(climate::CLIMATE_MODE_COOL);
+  if (this->supports_heat_)
+    traits.add_supported_mode(climate::CLIMATE_MODE_HEAT);
+  if (this->supports_dry_)
+    traits.add_supported_mode(climate::CLIMATE_MODE_DRY);
+  if (this->supports_fan_only_)
+    traits.add_supported_mode(climate::CLIMATE_MODE_FAN_ONLY);
+
+  traits.set_visual_min_temperature(this->minimum_temperature_);
+  traits.set_visual_max_temperature(this->maximum_temperature_);
+  traits.set_visual_temperature_step(this->temperature_step_);
+  traits.set_supported_fan_modes(this->fan_modes_);
+  traits.set_supported_swing_modes(this->swing_modes_);
+  traits.set_supported_presets(this->presets_);
+  return traits;
+}
+
+void ClimateIR::setup() {
+  if (this->sensor_) {
+    this->sensor_->add_on_state_callback([this](float state) {
+      this->current_temperature = state;
+      // current temperature changed, publish state
+      this->publish_state();
+    });
+    this->current_temperature = this->sensor_->state;
+  }
+  if (this->humidity_sensor_ != nullptr) {
+    this->humidity_sensor_->add_on_state_callback([this](float state) {
+      this->current_humidity = state;
+      // current humidity changed, publish state
+      this->publish_state();
+    });
+    this->current_humidity = this->humidity_sensor_->state;
+  }
+
+  // restore set points
+  auto restore = this->restore_state_();
+  if (restore.has_value()) {
+    restore->apply(this);
+  } else {
+    // restore from defaults
+    this->mode = climate::CLIMATE_MODE_OFF;
+    // initialize target temperature to some value so that it's not NAN
+    this->target_temperature =
+        roundf(clamp(this->current_temperature, this->minimum_temperature_, this->maximum_temperature_));
+    this->fan_mode = climate::CLIMATE_FAN_AUTO;
+    this->swing_mode = climate::CLIMATE_SWING_OFF;
+    this->preset = climate::CLIMATE_PRESET_NONE;
+  }
+  // Never send nan to HA
+  if (std::isnan(this->target_temperature))
+    this->target_temperature = 24;
+}
+
+void ClimateIR::control(const climate::ClimateCall &call) {
+  auto mode = call.get_mode();
+  if (mode.has_value())
+    this->mode = *mode;
+  auto target_temperature = call.get_target_temperature();
+  if (target_temperature.has_value())
+    this->target_temperature = *target_temperature;
+  auto fan_mode = call.get_fan_mode();
+  if (fan_mode.has_value())
+    this->fan_mode = fan_mode;
+  auto swing_mode = call.get_swing_mode();
+  if (swing_mode.has_value())
+    this->swing_mode = *swing_mode;
+  auto preset = call.get_preset();
+  if (preset.has_value())
+    this->preset = preset;
+  this->transmit_state();
+  this->publish_state();
+}
+void ClimateIR::dump_config() {
+  LOG_CLIMATE("", "IR Climate", this);
+  ESP_LOGCONFIG(TAG,
+                "  Min. Temperature: %.1f°C\n"
+                "  Max. Temperature: %.1f°C\n"
+                "  Supports HEAT: %s\n"
+                "  Supports COOL: %s",
+                this->minimum_temperature_, this->maximum_temperature_, YESNO(this->supports_heat_),
+                YESNO(this->supports_cool_));
+}
+
+}  // namespace esphome::climate_ir

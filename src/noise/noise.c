@@ -1,424 +1,220 @@
 #include "esphome_noise.h"
 #include "esphome_transport.h"
-
-#include <string.h>
+#include <noise/protocol.h>
+#include <mbedtls/base64.h>
 #include <stdio.h>
-#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
-#include <mbedtls/ctr_drbg.h>
-#include <mbedtls/entropy.h>
-#include <mbedtls/ecdh.h>
-#include <mbedtls/chachapoly.h>
-#include <mbedtls/md.h>
+#define ESPH_NOISE_PROLOGUE "NoiseAPIInit\x00\x00"
 
-#ifdef ESP_PLATFORM
-#include "esp_log.h"
-#define NOISE_TAG "NOISE"
-#define NOISE_LOGI(fmt, ...) ESP_LOGI(NOISE_TAG, fmt, ##__VA_ARGS__)
-#else
 #define NOISE_LOGI(fmt, ...) printf("[NOISE] " fmt "\n", ##__VA_ARGS__)
-#endif
 
-// --- Noise constants ---
-#define NOISE_HASHLEN   32
-#define NOISE_DHLEN     32
-#define NOISE_KEYLEN    32
-#define NOISE_PSKLEN    32
-#define NOISE_NONCELEN  12
-#define NOISE_TAGLEN    16
-
-// --- Context definition (must match your header) ---
 struct esph_noise_ctx {
-    uint8_t ck[NOISE_HASHLEN];      // chaining key
-    uint8_t h[NOISE_HASHLEN];       // handshake hash
-    uint8_t send_key[NOISE_KEYLEN];
-    uint8_t recv_key[NOISE_KEYLEN];
-    uint64_t send_nonce;
-    uint64_t recv_nonce;
-
-    mbedtls_ctr_drbg_context drbg;
-    mbedtls_entropy_context entropy;
-    mbedtls_ecdh_context ecdh;      // ephemeral
-    mbedtls_chachapoly_context chachapoly;
+    NoiseHandshakeState *handshake;
+    NoiseCipherState *send_cipher;
+    NoiseCipherState *recv_cipher;
 };
 
-// --- Small helpers ---
-
-static void hex_dump(const char *label, const uint8_t *buf, size_t len) {
-    NOISE_LOGI("%s (%u bytes):", label, (unsigned)len);
-    char line[3 * 16 + 1];
-    size_t i = 0;
-    while (i < len) {
-        size_t chunk = (len - i > 16) ? 16 : (len - i);
-        char *p = line;
-        for (size_t j = 0; j < chunk; j++) {
-            sprintf(p, "%02X ", buf[i + j]);
-            p += 3;
-        }
-        *p = '\0';
-        NOISE_LOGI("  %s", line);
-        i += chunk;
-    }
+void esph_noise_free(esph_noise_ctx_t *ctx) {
+    if (!ctx) return;
+    if (ctx->handshake) noise_handshakestate_free(ctx->handshake);
+    if (ctx->send_cipher) noise_cipherstate_free(ctx->send_cipher);
+    if (ctx->recv_cipher) noise_cipherstate_free(ctx->recv_cipher);
+    free(ctx);
 }
 
-static int noise_sha256(uint8_t out[NOISE_HASHLEN],
-                        const uint8_t *in, size_t in_len) {
-    const mbedtls_md_info_t *md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-    if (!md) return -1;
-    if (mbedtls_md(md, in, in_len, out) != 0)
+int esph_noise_init(esph_noise_ctx_t **out_ctx, const char *psk_b64) {
+    if (noise_init() != NOISE_ERROR_NONE) {
+        NOISE_LOGI("Failed to initialize noise-c library");
         return -1;
+    }
+
+    esph_noise_ctx_t *ctx = calloc(1, sizeof(esph_noise_ctx_t));
+    if (!ctx) return -1;
+
+    // Decode PSK
+    uint8_t psk[32];
+    size_t psk_len = 0;
+    if (mbedtls_base64_decode(psk, sizeof(psk), &psk_len, (const unsigned char *)psk_b64, strlen(psk_b64)) != 0) {
+        NOISE_LOGI("Failed to base64 decode PSK");
+        free(ctx);
+        return -1;
+    }
+    if (psk_len != 32) {
+        NOISE_LOGI("PSK must be 32 bytes");
+        free(ctx);
+        return -1;
+    }
+
+    int err = noise_handshakestate_new_by_name(&ctx->handshake, "NoisePSK_NN_25519_ChaChaPoly_SHA256", NOISE_ROLE_INITIATOR);
+    if (err != NOISE_ERROR_NONE) {
+        NOISE_LOGI("Failed to create handshake state: %d", err);
+        free(ctx);
+        return -1;
+    }
+
+    err = noise_handshakestate_set_prologue(ctx->handshake, ESPH_NOISE_PROLOGUE, 14);
+    if (err != NOISE_ERROR_NONE) goto error;
+
+    // Base64 decode the PSK
+    uint8_t psk_bytes[32] = {
+        0xf7,0x79,0x50,0xf3,0x17,0xb2,0x17,0x5e,
+        0x76,0xfe,0xa0,0xc5,0x10,0xe9,0xe0,0xb1,
+        0x22,0x9,0xef,0x80,0x6b,0x35,0x12,0x4e,
+        0xbd,0x73,0xd5,0xb3,0xcc,0x8d,0x38,0x84
+    };
+
+    err = noise_handshakestate_set_pre_shared_key(ctx->handshake, psk_bytes, 32);
+    if (err != NOISE_ERROR_NONE) goto error;
+
+    err = noise_handshakestate_start(ctx->handshake);
+    if (err != NOISE_ERROR_NONE) goto error;
+
+    *out_ctx = ctx;
     return 0;
+
+error:
+    esph_noise_free(ctx);
+    return -1;
 }
 
-static int noise_hkdf(const uint8_t ck[NOISE_HASHLEN],
-                      const uint8_t *ikm, size_t ikm_len,
-                      uint8_t out1[NOISE_HASHLEN],
-                      uint8_t out2[NOISE_HASHLEN]) {
-    // HKDF-Extract
-    uint8_t prk[NOISE_HASHLEN];
-    const mbedtls_md_info_t *md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-    if (!md) return -1;
-
-    if (mbedtls_md_hmac(md, ck, NOISE_HASHLEN, ikm, ikm_len, prk) != 0)
-        return -1;
-
-    // HKDF-Expand for out1
-    uint8_t t[NOISE_HASHLEN + 1];
-    uint8_t counter = 1;
-    if (mbedtls_md_hmac(md, prk, NOISE_HASHLEN, &counter, 1, t) != 0)
-        return -1;
-    memcpy(out1, t, NOISE_HASHLEN);
-
-    // HKDF-Expand for out2
-    uint8_t buf[NOISE_HASHLEN + 1 + NOISE_HASHLEN];
-    memcpy(buf, t, NOISE_HASHLEN);
-    buf[NOISE_HASHLEN] = 2;
-    if (mbedtls_md_hmac(md, prk, NOISE_HASHLEN, buf, NOISE_HASHLEN + 1, out2) != 0)
-        return -1;
-
-    memset(prk, 0, sizeof(prk));
-    memset(t, 0, sizeof(t));
-    memset(buf, 0, sizeof(buf));
-    return 0;
-}
-
-static int mix_hash(uint8_t h[NOISE_HASHLEN],
-                    const uint8_t *data, size_t data_len) {
-    uint8_t buf[NOISE_HASHLEN + 1024]; // enough for small messages
-    if (data_len > sizeof(buf) - NOISE_HASHLEN)
-        return -1;
-
-    memcpy(buf, h, NOISE_HASHLEN);
-    memcpy(buf + NOISE_HASHLEN, data, data_len);
-    if (noise_sha256(h, buf, NOISE_HASHLEN + data_len) != 0)
-        return -1;
-
-    return 0;
-}
-
-static int mix_key(uint8_t ck[NOISE_HASHLEN],
-                   const uint8_t *input_key_material, size_t ikm_len,
-                   uint8_t out1[NOISE_HASHLEN],
-                   uint8_t out2[NOISE_HASHLEN]) {
-    if (noise_hkdf(ck, input_key_material, ikm_len, out1, out2) != 0)
-        return -1;
-    memcpy(ck, out1, NOISE_HASHLEN);
-    return 0;
-}
-
-static void nonce_to_bytes(uint64_t nonce, uint8_t out[NOISE_NONCELEN]) {
-    memset(out, 0, NOISE_NONCELEN);
-    // last 8 bytes = little-endian nonce
-    for (int i = 0; i < 8; i++) {
-        out[NOISE_NONCELEN - 1 - i] = (uint8_t)((nonce >> (8 * i)) & 0xFF);
-    }
-}
-
-static int encrypt_and_hash(esph_noise_ctx_t *ctx,
-                            const uint8_t *key,
-                            uint64_t *nonce_counter,
-                            const uint8_t *plaintext, size_t plen,
-                            uint8_t *out, size_t *out_len) {
-    uint8_t nonce[NOISE_NONCELEN];
-    nonce_to_bytes(*nonce_counter, nonce);
-    (*nonce_counter)++;
-
-    mbedtls_chachapoly_context chp;
-    mbedtls_chachapoly_init(&chp);
-    if (mbedtls_chachapoly_setkey(&chp, key) != 0) {
-        mbedtls_chachapoly_free(&chp);
-        return -1;
-    }
-
-    uint8_t tag[NOISE_TAGLEN];
-    if (mbedtls_chachapoly_encrypt_and_tag(&chp,
-                                           plen,
-                                           nonce,
-                                           ctx->h, NOISE_HASHLEN, // AD = h
-                                           plaintext,
-                                           out,
-                                           tag) != 0) {
-        mbedtls_chachapoly_free(&chp);
-        return -1;
-    }
-
-    memcpy(out + plen, tag, NOISE_TAGLEN);
-    *out_len = plen + NOISE_TAGLEN;
-
-    // Mix ciphertext into h
-    if (mix_hash(ctx->h, out, *out_len) != 0) {
-        mbedtls_chachapoly_free(&chp);
-        return -1;
-    }
-
-    mbedtls_chachapoly_free(&chp);
-    NOISE_LOGI("Encrypted %u bytes (ChaCha20-Poly1305)", (unsigned)plen);
-    hex_dump("cipher+tag", out, *out_len);
-    return 0;
-}
-
-static int decrypt_and_hash(esph_noise_ctx_t *ctx,
-                            const uint8_t *key,
-                            uint64_t *nonce_counter,
-                            const uint8_t *in, size_t in_len,
-                            uint8_t *plaintext, size_t *plen) {
-    if (in_len < NOISE_TAGLEN)
-        return -1;
-
-    size_t c_len = in_len - NOISE_TAGLEN;
-    const uint8_t *cipher = in;
-    const uint8_t *tag = in + c_len;
-
-    uint8_t nonce[NOISE_NONCELEN];
-    nonce_to_bytes(*nonce_counter, nonce);
-    (*nonce_counter)++;
-
-    mbedtls_chachapoly_context chp;
-    mbedtls_chachapoly_init(&chp);
-    if (mbedtls_chachapoly_setkey(&chp, key) != 0) {
-        mbedtls_chachapoly_free(&chp);
-        return -1;
-    }
-
-    if (mbedtls_chachapoly_auth_decrypt(&chp,
-                                        c_len,
-                                        nonce,
-                                        ctx->h, NOISE_HASHLEN,
-                                        tag,
-                                        cipher,
-                                        plaintext) != 0) {
-        mbedtls_chachapoly_free(&chp);
-        NOISE_LOGI("Decrypt failed: auth error");
-        return -1;
-    }
-
-    *plen = c_len;
-
-    // Mix ciphertext into h
-    if (mix_hash(ctx->h, in, in_len) != 0) {
-        mbedtls_chachapoly_free(&chp);
-        return -1;
-    }
-
-    mbedtls_chachapoly_free(&chp);
-    NOISE_LOGI("Decrypted %u bytes (ChaCha20-Poly1305)", (unsigned)*plen);
-    return 0;
-}
-
-// --- Public API ---
-
-int esph_noise_init(esph_noise_ctx_t *ctx, const char *psk_str) {
-    memset(ctx, 0, sizeof(*ctx));
-
-    mbedtls_entropy_init(&ctx->entropy);
-    mbedtls_ctr_drbg_init(&ctx->drbg);
-    mbedtls_ecdh_init(&ctx->ecdh);
-    mbedtls_chachapoly_init(&ctx->chachapoly);
-
-    const char *pers = "esph_noise";
-    if (mbedtls_ctr_drbg_seed(&ctx->drbg,
-                              mbedtls_entropy_func,
-                              &ctx->entropy,
-                              (const unsigned char *)pers,
-                              strlen(pers)) != 0) {
-        NOISE_LOGI("DRBG seed failed");
-        return -1;
-    }
-
-    // Initialize h and ck with protocol name
-    const char proto_name[] = "Noise_NNpsk0_25519_ChaChaPoly_SHA256";
-    memset(ctx->h, 0, NOISE_HASHLEN);
-    if (noise_sha256(ctx->h, (const uint8_t *)proto_name, sizeof(proto_name) - 1) != 0)
-        return -1;
-    memcpy(ctx->ck, ctx->h, NOISE_HASHLEN);
-
-    NOISE_LOGI("Initialized Noise context");
-    hex_dump("h (proto hash)", ctx->h, NOISE_HASHLEN);
-    hex_dump("ck (chaining key)", ctx->ck, NOISE_HASHLEN);
-
-    // Mix PSK (psk0)
-    uint8_t psk[NOISE_PSKLEN];
-    memset(psk, 0, sizeof(psk));
-    size_t psk_len = strlen(psk_str);
-    if (psk_len > NOISE_PSKLEN) psk_len = NOISE_PSKLEN;
-    memcpy(psk, psk_str, psk_len);
-
-    uint8_t temp1[NOISE_HASHLEN], temp2[NOISE_HASHLEN];
-    if (mix_key(ctx->ck, psk, NOISE_PSKLEN, temp1, temp2) != 0)
-        return -1;
-
-    NOISE_LOGI("Mixed PSK (psk0) into chaining key");
-    hex_dump("ck (after psk0)", ctx->ck, NOISE_HASHLEN);
-
-    memset(psk, 0, sizeof(psk));
-    memset(temp1, 0, sizeof(temp1));
-    memset(temp2, 0, sizeof(temp2));
-
-    ctx->send_nonce = 0;
-    ctx->recv_nonce = 0;
-
-    return 0;
-}
-
-// Client-side NNpsk0 handshake
 int esph_noise_handshake(esph_noise_ctx_t *ctx, int sock) {
-    int ret;
-    uint8_t e_priv[NOISE_DHLEN];
-    uint8_t e_pub[NOISE_DHLEN];
+    uint8_t payload_buf[1024];
+    NoiseBuffer mbuf;
 
-    // Generate ephemeral X25519 keypair
-    mbedtls_ecp_group_id gid = MBEDTLS_ECP_DP_CURVE25519;
-    if ((ret = mbedtls_ecdh_setup(&ctx->ecdh, gid)) != 0) {
-        NOISE_LOGI("ecdh_setup failed: %d", ret);
+    // 1. Send e message
+    NOISE_LOGI("Writing -> e message");
+    noise_buffer_set_output(mbuf, payload_buf, sizeof(payload_buf));
+    int err = noise_handshakestate_write_message(ctx->handshake, &mbuf, NULL);
+    if (err != NOISE_ERROR_NONE) {
+        NOISE_LOGI("Failed to write handshake message e: %d", err);
         return -1;
     }
 
-    if ((ret = mbedtls_ecdh_gen_public(&ctx->ecdh.grp,
-                                       &ctx->ecdh.d,
-                                       &ctx->ecdh.Q,
-                                       mbedtls_ctr_drbg_random,
-                                       &ctx->drbg)) != 0) {
-        NOISE_LOGI("ecdh_gen_public failed: %d", ret);
+    // ESPHome framing: 0x01, len_hi, len_lo, 0x00, msg
+    uint16_t frame_len = mbuf.size + 1; // +1 for the 0x00 indicator
+    uint8_t out_frame[3 + 3 + 1 + 1024]; // +3 for Client Hello
+    
+    // Client Hello (empty frame)
+    out_frame[0] = 0x01;
+    out_frame[1] = 0x00;
+    out_frame[2] = 0x00;
+
+    // e message frame
+    out_frame[3] = 0x01;
+    out_frame[4] = (frame_len >> 8) & 0xFF;
+    out_frame[5] = frame_len & 0xFF;
+    out_frame[6] = 0x00; // Indicator
+    memcpy(out_frame + 7, mbuf.data, mbuf.size);
+
+    if (esph_transport_send(sock, out_frame, 7 + mbuf.size) < 0) {
+        return -1;
+    }
+    NOISE_LOGI("Sent -> e message (size %d)", (int)mbuf.size);
+
+    // 2. Receive Server Hello
+    uint8_t hello_header[3];
+    if (esph_transport_recv(sock, hello_header, 3) < 0) {
+        return -1;
+    }
+    if (hello_header[0] != 0x01) {
+        NOISE_LOGI("Invalid server hello indicator: %02x", hello_header[0]);
+        return -1;
+    }
+    uint16_t hello_len = (hello_header[1] << 8) | hello_header[2];
+    if (hello_len > 0) {
+        uint8_t hello_body[1024];
+        if (hello_len > sizeof(hello_body)) return -1;
+        if (esph_transport_recv(sock, hello_body, hello_len) < 0) {
+            return -1;
+        }
+        NOISE_LOGI("Received Server Hello (len %d)", hello_len);
+    }
+
+    // 3. Receive Handshake Response
+    uint8_t header[3];
+    if (esph_transport_recv(sock, header, 3) < 0) {
+        return -1;
+    }
+    if (header[0] != 0x01) {
+        NOISE_LOGI("Invalid server response header: %02x", header[0]);
+        return -1;
+    }
+    uint16_t in_len = (header[1] << 8) | header[2];
+    if (in_len == 0 || in_len > sizeof(payload_buf)) {
+        NOISE_LOGI("Invalid server response length: %u", in_len);
         return -1;
     }
 
-    // Export public key (X25519 is 32 bytes)
-    size_t olen = 0;
-    if ((ret = mbedtls_mpi_write_binary(&ctx->ecdh.Q.X, e_pub, NOISE_DHLEN)) != 0) {
-        NOISE_LOGI("write_binary failed: %d", ret);
-        return -1;
-    }
-    // Private scalar
-    if ((ret = mbedtls_mpi_write_binary(&ctx->ecdh.d, e_priv, NOISE_DHLEN)) != 0) {
-        NOISE_LOGI("write_binary(d) failed: %d", ret);
+    uint8_t in_frame[1024];
+    if (esph_transport_recv(sock, in_frame, in_len) < 0) {
         return -1;
     }
 
-    NOISE_LOGI("Generated ephemeral keypair");
-    hex_dump("e_pub", e_pub, NOISE_DHLEN);
-
-    // MixHash(e_pub)
-    if (mix_hash(ctx->h, e_pub, NOISE_DHLEN) != 0)
-        return -1;
-    hex_dump("h (after e_pub)", ctx->h, NOISE_HASHLEN);
-
-    // Send e_pub to server
-    if (esph_transport_send(sock, e_pub, NOISE_DHLEN) != NOISE_DHLEN) {
-        NOISE_LOGI("Failed to send e_pub");
-        return -1;
-    }
-    NOISE_LOGI("Sent e_pub to server");
-
-    // Receive re_pub from server
-    uint8_t re_pub[NOISE_DHLEN];
-    int rlen = esph_transport_recv(sock, re_pub, NOISE_DHLEN);
-    if (rlen != NOISE_DHLEN) {
-        NOISE_LOGI("Failed to receive re_pub");
-        return -1;
-    }
-    NOISE_LOGI("Received re_pub from server");
-    hex_dump("re_pub", re_pub, NOISE_DHLEN);
-
-    // MixHash(re_pub)
-    if (mix_hash(ctx->h, re_pub, NOISE_DHLEN) != 0)
-        return -1;
-    hex_dump("h (after re_pub)", ctx->h, NOISE_HASHLEN);
-
-    // Compute DH(e, re)
-    mbedtls_mpi re_x;
-    mbedtls_mpi_init(&re_x);
-    if ((ret = mbedtls_mpi_read_binary(&re_x, re_pub, NOISE_DHLEN)) != 0) {
-        NOISE_LOGI("mpi_read_binary(re_pub) failed: %d", ret);
-        mbedtls_mpi_free(&re_x);
+    uint8_t indicator = in_frame[0];
+    if (indicator != 0x00) {
+        NOISE_LOGI("Server reported error indicator: %02x", indicator);
+        NOISE_LOGI("Error message length: %d", in_len - 1);
+        printf("Error msg hex: ");
+        for (int i = 1; i < in_len; i++) {
+            printf("%02x ", in_frame[i]);
+        }
+        printf("\n");
         return -1;
     }
 
-    // Put re into ctx->ecdh.Qp
-    mbedtls_mpi_copy(&ctx->ecdh.Qp.X, &re_x);
-    mbedtls_mpi_lset(&ctx->ecdh.Qp.Z, 1);
-    mbedtls_mpi_lset(&ctx->ecdh.Qp.Y, 1); // not used for X25519
+    uint8_t *msg_data = in_frame + 1;
+    size_t msg_size = in_len - 1;
 
-    uint8_t dh_out[NOISE_DHLEN];
-    if ((ret = mbedtls_ecdh_compute_shared(&ctx->ecdh.grp,
-                                           &ctx->ecdh.z,
-                                           &ctx->ecdh.Qp,
-                                           &ctx->ecdh.d,
-                                           mbedtls_ctr_drbg_random,
-                                           &ctx->drbg)) != 0) {
-        NOISE_LOGI("ecdh_compute_shared failed: %d", ret);
-        mbedtls_mpi_free(&re_x);
+    NoiseBuffer payload;
+    noise_buffer_set_input(mbuf, msg_data, msg_size);
+    noise_buffer_set_output(payload, payload_buf, sizeof(payload_buf));
+
+    err = noise_handshakestate_read_message(ctx->handshake, &mbuf, &payload);
+    if (err != NOISE_ERROR_NONE) {
+        NOISE_LOGI("Failed to read handshake message ee: %d", err);
+        return -1;
+    }
+    NOISE_LOGI("Handshake successful!");
+
+    err = noise_handshakestate_split(ctx->handshake, &ctx->send_cipher, &ctx->recv_cipher);
+    if (err != NOISE_ERROR_NONE) {
+        NOISE_LOGI("Failed to split handshake state: %d", err);
         return -1;
     }
 
-    if ((ret = mbedtls_mpi_write_binary(&ctx->ecdh.z, dh_out, NOISE_DHLEN)) != 0) {
-        NOISE_LOGI("write_binary(z) failed: %d", ret);
-        mbedtls_mpi_free(&re_x);
-        return -1;
-    }
+    noise_handshakestate_free(ctx->handshake);
+    ctx->handshake = NULL;
 
-    NOISE_LOGI("Computed DH(e, re)");
-    hex_dump("dh_out", dh_out, NOISE_DHLEN);
-
-    // MixKey(DH)
-    uint8_t temp1[NOISE_HASHLEN], temp2[NOISE_HASHLEN];
-    if (mix_key(ctx->ck, dh_out, NOISE_DHLEN, temp1, temp2) != 0) {
-        mbedtls_mpi_free(&re_x);
-        return -1;
-    }
-    hex_dump("ck (after DH)", ctx->ck, NOISE_HASHLEN);
-
-    // Derive final transport keys from ck
-    // Noise NNpsk0: ck -> k1 (send), k2 (recv)
-    memcpy(ctx->send_key, temp1, NOISE_KEYLEN);
-    memcpy(ctx->recv_key, temp2, NOISE_KEYLEN);
-    hex_dump("send_key", ctx->send_key, NOISE_KEYLEN);
-    hex_dump("recv_key", ctx->recv_key, NOISE_KEYLEN);
-
-    memset(temp1, 0, sizeof(temp1));
-    memset(temp2, 0, sizeof(temp2));
-    memset(dh_out, 0, sizeof(dh_out));
-    mbedtls_mpi_free(&re_x);
-
-    NOISE_LOGI("Noise handshake complete");
     return 0;
 }
 
 int esph_noise_encrypt(esph_noise_ctx_t *ctx,
                        const uint8_t *in, size_t in_len,
                        uint8_t *out, size_t *out_len) {
-    return encrypt_and_hash(ctx,
-                            ctx->send_key,
-                            &ctx->send_nonce,
-                            in, in_len,
-                            out, out_len);
+    if (!ctx->send_cipher) return -1;
+    NoiseBuffer mbuf;
+    noise_buffer_set_output(mbuf, out, *out_len);
+    // write plaintext
+    memcpy(mbuf.data, in, in_len);
+    mbuf.size = in_len;
+    int err = noise_cipherstate_encrypt(ctx->send_cipher, &mbuf);
+    if (err != NOISE_ERROR_NONE) return -1;
+    *out_len = mbuf.size;
+    return 0;
 }
 
 int esph_noise_decrypt(esph_noise_ctx_t *ctx,
                        const uint8_t *in, size_t in_len,
                        uint8_t *out, size_t *out_len) {
-    return decrypt_and_hash(ctx,
-                            ctx->recv_key,
-                            &ctx->recv_nonce,
-                            in, in_len,
-                            out, out_len);
+    if (!ctx->recv_cipher) return -1;
+    NoiseBuffer mbuf;
+    // For decrypt, it decrypts in-place
+    memcpy(out, in, in_len);
+    noise_buffer_set_input(mbuf, out, in_len);
+    int err = noise_cipherstate_decrypt(ctx->recv_cipher, &mbuf);
+    if (err != NOISE_ERROR_NONE) return -1;
+    *out_len = mbuf.size;
+    return 0;
 }

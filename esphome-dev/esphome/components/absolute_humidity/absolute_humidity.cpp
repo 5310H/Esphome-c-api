@@ -1,0 +1,182 @@
+#include "esphome/core/log.h"
+#include "absolute_humidity.h"
+
+namespace esphome::absolute_humidity {
+
+static const char *const TAG{"absolute_humidity.sensor"};
+
+void AbsoluteHumidityComponent::setup() {
+  this->temperature_sensor_->add_on_state_callback([this](float state) {
+    this->temperature_ = state;
+    this->enable_loop();
+  });
+  ESP_LOGD(TAG, "  Added callback for temperature '%s'", this->temperature_sensor_->get_name().c_str());
+  // Get initial value
+  if (this->temperature_sensor_->has_state()) {
+    this->temperature_ = this->temperature_sensor_->get_state();
+  }
+
+  this->humidity_sensor_->add_on_state_callback([this](float state) {
+    this->humidity_ = state;
+    this->enable_loop();
+  });
+  ESP_LOGD(TAG, "  Added callback for relative humidity '%s'", this->humidity_sensor_->get_name().c_str());
+  // Get initial value
+  if (this->humidity_sensor_->has_state()) {
+    this->humidity_ = this->humidity_sensor_->get_state();
+  }
+}
+
+void AbsoluteHumidityComponent::dump_config() {
+  LOG_SENSOR("", "Absolute Humidity", this);
+
+  switch (this->equation_) {
+    case BUCK:
+      ESP_LOGCONFIG(TAG, "Saturation Vapor Pressure Equation: Buck");
+      break;
+    case TETENS:
+      ESP_LOGCONFIG(TAG, "Saturation Vapor Pressure Equation: Tetens");
+      break;
+    case WOBUS:
+      ESP_LOGCONFIG(TAG, "Saturation Vapor Pressure Equation: Wobus");
+      break;
+    default:
+      ESP_LOGE(TAG, "Invalid saturation vapor pressure equation selection!");
+      break;
+  }
+
+  ESP_LOGCONFIG(TAG,
+                "Sources\n"
+                "  Temperature: '%s'\n"
+                "  Relative Humidity: '%s'",
+                this->temperature_sensor_->get_name().c_str(), this->humidity_sensor_->get_name().c_str());
+}
+
+void AbsoluteHumidityComponent::loop() {
+  // Only run once
+  this->disable_loop();
+
+  // Ensure we have source data
+  const bool no_temperature{std::isnan(this->temperature_)};
+  const bool no_humidity{std::isnan(this->humidity_)};
+  if (no_temperature || no_humidity) {
+    if (no_temperature) {
+      ESP_LOGW(TAG, "No valid state from temperature sensor!");
+    }
+    if (no_humidity) {
+      ESP_LOGW(TAG, "No valid state from humidity sensor!");
+    }
+    this->publish_state(NAN);
+    this->status_set_warning(LOG_STR("Unable to calculate absolute humidity."));
+    return;
+  }
+
+  // Convert to desired units
+  const float temperature_c{this->temperature_};
+  const float temperature_k{temperature_c + 273.15f};
+  const float hr{this->humidity_ / 100.0f};
+
+  // Calculate saturation vapor pressure
+  float es;
+  switch (this->equation_) {
+    case BUCK:
+      es = es_buck(temperature_c);
+      break;
+    case TETENS:
+      es = es_tetens(temperature_c);
+      break;
+    case WOBUS:
+      es = es_wobus(temperature_c);
+      break;
+    default:
+      this->publish_state(NAN);
+      this->status_set_error(LOG_STR("Invalid saturation vapor pressure equation selection!"));
+      return;
+  }
+
+  // Calculate absolute humidity
+  const float absolute_humidity{vapor_density(es, hr, temperature_k)};
+
+  ESP_LOGD(TAG, "Saturation vapor pressure %f kPa, absolute humidity %f g/m³", es, absolute_humidity);
+
+  // Publish absolute humidity
+  this->status_clear_warning();
+  this->publish_state(absolute_humidity);
+}
+
+// Buck equation (https://en.wikipedia.org/wiki/Arden_Buck_equation)
+// More accurate than Tetens in normal meteorologic conditions
+float AbsoluteHumidityComponent::es_buck(float temperature_c) {
+  float a, b, c, d;
+  if (temperature_c >= 0.0f) {
+    a = 0.61121f;
+    b = 18.678f;
+    c = 234.5f;
+    d = 257.14f;
+  } else {
+    a = 0.61115f;
+    b = 18.678f;
+    c = 233.7f;
+    d = 279.82f;
+  }
+  return a * expf((b - (temperature_c / c)) * (temperature_c / (d + temperature_c)));
+}
+
+// Tetens equation (https://en.wikipedia.org/wiki/Tetens_equation)
+float AbsoluteHumidityComponent::es_tetens(float temperature_c) {
+  float a, b;
+  if (temperature_c >= 0.0f) {
+    a = 17.27f;
+    b = 237.3f;
+  } else {
+    a = 21.875f;
+    b = 265.5f;
+  }
+  return 0.61078f * expf((a * temperature_c) / (temperature_c + b));
+}
+
+// Wobus equation
+// https://wahiduddin.net/calc/density_altitude.htm
+// https://wahiduddin.net/calc/density_algorithms.htm
+// Calculate the saturation vapor pressure (kPa)
+float AbsoluteHumidityComponent::es_wobus(float t) {
+  // THIS FUNCTION RETURNS THE SATURATION VAPOR PRESSURE ESW (MILLIBARS)
+  // OVER LIQUID WATER GIVEN THE TEMPERATURE T (CELSIUS). THE POLYNOMIAL
+  // APPROXIMATION BELOW IS DUE TO HERMAN WOBUS, A MATHEMATICIAN WHO
+  // WORKED AT THE NAVY WEATHER RESEARCH FACILITY, NORFOLK, VIRGINIA,
+  // BUT WHO IS NOW RETIRED. THE COEFFICIENTS OF THE POLYNOMIAL WERE
+  // CHOSEN TO FIT THE VALUES IN TABLE 94 ON PP. 351-353 OF THE SMITH-
+  // SONIAN METEOROLOGICAL TABLES BY ROLAND LIST (6TH EDITION). THE
+  // APPROXIMATION IS VALID FOR -50 < T < 100C.
+  //
+  //     Baker, Schlatter  17-MAY-1982     Original version.
+
+  constexpr float c0{+0.99999683e+00f};
+  constexpr float c1{-0.90826951e-02f};
+  constexpr float c2{+0.78736169e-04f};
+  constexpr float c3{-0.61117958e-06f};
+  constexpr float c4{+0.43884187e-08f};
+  constexpr float c5{-0.29883885e-10f};
+  constexpr float c6{+0.21874425e-12f};
+  constexpr float c7{-0.17892321e-14f};
+  constexpr float c8{+0.11112018e-16f};
+  constexpr float c9{-0.30994571e-19f};
+  const float p{c0 + t * (c1 + t * (c2 + t * (c3 + t * (c4 + t * (c5 + t * (c6 + t * (c7 + t * (c8 + t * (c9)))))))))};
+  return 0.61078f / powf(p, 8.0f);
+}
+
+// From https://www.environmentalbiophysics.org/chalk-talk-how-to-calculate-absolute-humidity/
+// H/T to https://esphome.io/cookbook/bme280_environment/
+// H/T to https://carnotcycle.wordpress.com/2012/08/04/how-to-convert-relative-humidity-to-absolute-humidity/
+float AbsoluteHumidityComponent::vapor_density(float es, float hr, float ta) {
+  // es = saturated vapor pressure (kPa)
+  // hr = relative humidity [0-1]
+  // ta = absolute temperature (K)
+
+  const float ea{hr * es * 1000.0f};  // vapor pressure of the air (Pa)
+  const float mw{18.01528f};          // molar mass of water (g⋅mol⁻¹)
+  const float r{8.31446261815324f};   // molar gas constant (J⋅K⁻¹)
+  return (ea * mw) / (r * ta);
+}
+
+}  // namespace esphome::absolute_humidity

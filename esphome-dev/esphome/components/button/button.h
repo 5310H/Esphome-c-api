@@ -1,0 +1,49 @@
+#pragma once
+
+#include "esphome/core/component.h"
+#include "esphome/core/entity_base.h"
+#include "esphome/core/helpers.h"
+
+namespace esphome::button {
+
+class Button;
+void log_button(const char *tag, const char *prefix, const char *type, Button *obj);
+
+#define LOG_BUTTON(prefix, type, obj) log_button(TAG, prefix, LOG_STR_LITERAL(type), obj)
+
+#define SUB_BUTTON(name) \
+ protected: \
+  button::Button *name##_button_{nullptr}; \
+\
+ public: \
+  void set_##name##_button(button::Button *button) { this->name##_button_ = button; }
+
+/** Base class for all buttons.
+ *
+ * A button is just a momentary switch that does not have a state, only a trigger.
+ */
+class Button : public EntityBase {
+ public:
+  /** Press this button. This is called by the front-end.
+   *
+   * For implementing buttons, please override press_action.
+   */
+  void press();
+
+  /** Set callback for state changes.
+   *
+   * @param callback The void() callback.
+   */
+  template<typename F> void add_on_press_callback(F &&callback) {
+    this->press_callback_.add(std::forward<F>(callback));
+  }
+
+ protected:
+  /** You should implement this virtual method if you want to create your own button.
+   */
+  virtual void press_action() = 0;
+
+  LazyCallbackManager<void()> press_callback_{};
+};
+
+}  // namespace esphome::button

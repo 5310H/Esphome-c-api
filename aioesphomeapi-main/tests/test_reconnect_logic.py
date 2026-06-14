@@ -1,0 +1,1624 @@
+from __future__ import annotations
+
+import asyncio
+from functools import partial
+from ipaddress import ip_address
+import logging
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+
+import pytest
+from zeroconf import (
+    DNSAddress,
+    DNSPointer,
+    DNSRecord,
+    RecordUpdate,
+    Zeroconf,
+    current_time_millis,
+)
+from zeroconf.asyncio import AsyncZeroconf
+from zeroconf.const import _CLASS_IN, _TYPE_A, _TYPE_AAAA, _TYPE_PTR
+
+from aioesphomeapi import (
+    APIConnectionError,
+    EncryptionPlaintextAPIError,
+    RequiresEncryptionAPIError,
+)
+from aioesphomeapi.client import APIClient
+from aioesphomeapi.core import APIConnectionCancelledError
+
+if TYPE_CHECKING:
+    from aioesphomeapi._frame_helper.plain_text import APIPlaintextFrameHelper
+from aioesphomeapi.reconnect_logic import (
+    MAXIMUM_BACKOFF_TRIES,
+    ReconnectLogic,
+    ReconnectLogicState,
+)
+
+from .common import (
+    get_mock_async_zeroconf,
+    get_mock_zeroconf,
+    mock_data_received,
+    send_plaintext_auth_response,
+    send_plaintext_hello,
+)
+from .conftest import _create_mock_transport_protocol
+
+logging.getLogger("aioesphomeapi").setLevel(logging.DEBUG)
+
+
+def find_log_with_message(
+    caplog: pytest.LogCaptureFixture,
+    message_substring: str,
+) -> logging.LogRecord | None:
+    """Find a log record containing the specified message substring.
+
+    Args:
+        caplog: pytest log capture fixture
+        message_substring: substring to search for in log messages
+
+    Returns:
+        LogRecord if found, None otherwise
+
+    """
+    for record in caplog.records:
+        if message_substring in record.message:
+            return record
+    return None
+
+
+async def slow_connect_fail(*args, **kwargs):
+    await asyncio.sleep(10)
+    raise APIConnectionError
+
+
+async def quick_connect_fail(*args, **kwargs):
+    raise APIConnectionError
+
+
+async def test_reconnect_logic_name_from_host():
+    """Test that the name is set correctly from the host."""
+    cli = APIClient(
+        address="mydevice.local",
+        port=6052,
+        password=None,
+    )
+
+    async def on_disconnect(expected_disconnect: bool) -> None:
+        pass
+
+    async def on_connect() -> None:
+        pass
+
+    ReconnectLogic(
+        client=cli,
+        on_disconnect=on_disconnect,
+        on_connect=on_connect,
+        zeroconf_instance=MagicMock(spec=AsyncZeroconf),
+    )
+    assert cli.log_name == "mydevice.local"
+
+
+async def test_reconnect_logic_name_from_host_and_set():
+    """Test that the name is set correctly from the host."""
+    cli = APIClient(
+        address="mydevice.local",
+        port=6052,
+        password=None,
+    )
+
+    async def on_disconnect(expected_disconnect: bool) -> None:
+        pass
+
+    async def on_connect() -> None:
+        pass
+
+    rl = ReconnectLogic(
+        client=cli,
+        on_disconnect=on_disconnect,
+        on_connect=on_connect,
+        zeroconf_instance=get_mock_zeroconf(),
+        name="mydevice",
+    )
+    assert rl.name == "mydevice"
+    assert cli.log_name == "mydevice.local"
+
+
+async def test_reconnect_logic_name_from_address():
+    """Test that the name is set correctly from the address."""
+    cli = APIClient(
+        address="127.0.0.1",
+        port=6052,
+        password=None,
+    )
+
+    async def on_disconnect(expected_disconnect: bool) -> None:
+        pass
+
+    async def on_connect() -> None:
+        pass
+
+    ReconnectLogic(
+        client=cli,
+        on_disconnect=on_disconnect,
+        on_connect=on_connect,
+        zeroconf_instance=get_mock_zeroconf(),
+    )
+    assert cli.log_name == "127.0.0.1"
+
+
+async def test_reconnect_logic_name_from_name():
+    """Test that the name is set correctly from the address."""
+    cli = APIClient(
+        address="127.0.0.1",
+        port=6052,
+        password=None,
+    )
+
+    async def on_disconnect(expected_disconnect: bool) -> None:
+        pass
+
+    async def on_connect() -> None:
+        pass
+
+    ReconnectLogic(
+        client=cli,
+        on_disconnect=on_disconnect,
+        on_connect=on_connect,
+        zeroconf_instance=get_mock_zeroconf(),
+        name="mydevice",
+    )
+    assert cli.log_name == "mydevice @ 127.0.0.1"
+
+
+async def test_reconnect_logic_name_from_cli_address():
+    """Test that the name is set correctly from the address."""
+    cli = APIClient(
+        address="mydevice",
+        port=6052,
+        password=None,
+    )
+
+    async def on_disconnect(expected_disconnect: bool) -> None:
+        pass
+
+    async def on_connect() -> None:
+        pass
+
+    rl = ReconnectLogic(
+        client=cli,
+        on_disconnect=on_disconnect,
+        on_connect=on_connect,
+        zeroconf_instance=get_mock_zeroconf(),
+    )
+    assert cli.log_name == "mydevice"
+    assert rl.name == "mydevice"
+
+
+async def test_reconnect_logic_state(patchable_api_client: APIClient):
+    """Test that reconnect logic state changes."""
+    on_disconnect_called = []
+    on_connect_called = []
+    on_connect_fail_called = []
+
+    cli = patchable_api_client
+
+    async def on_disconnect(expected_disconnect: bool) -> None:
+        nonlocal on_disconnect_called
+        on_disconnect_called.append(expected_disconnect)
+
+    async def on_connect() -> None:
+        nonlocal on_connect_called
+        on_connect_called.append(True)
+
+    async def on_connect_fail(connect_exception: Exception) -> None:
+        nonlocal on_connect_called
+        on_connect_fail_called.append(connect_exception)
+
+    rl = ReconnectLogic(
+        client=cli,
+        on_disconnect=on_disconnect,
+        on_connect=on_connect,
+        zeroconf_instance=get_mock_zeroconf(),
+        name="mydevice",
+        on_connect_error=on_connect_fail,
+    )
+    assert cli.log_name == "mydevice @ 127.0.0.1"
+
+    with patch.object(cli, "start_resolve_host", side_effect=APIConnectionError):
+        await rl.start()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    assert len(on_disconnect_called) == 0
+    assert len(on_connect_called) == 0
+    assert len(on_connect_fail_called) == 1
+    assert isinstance(on_connect_fail_called[-1], APIConnectionError)
+    assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+    assert rl._tries == 1
+
+    with (
+        patch.object(cli, "start_resolve_host"),
+        patch.object(cli, "start_connection"),
+        patch.object(cli, "finish_connection", side_effect=RequiresEncryptionAPIError),
+    ):
+        await rl.start()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    assert len(on_disconnect_called) == 0
+    assert len(on_connect_called) == 0
+    assert len(on_connect_fail_called) == 2
+    assert isinstance(on_connect_fail_called[-1], RequiresEncryptionAPIError)
+    assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+    assert rl._tries == MAXIMUM_BACKOFF_TRIES
+
+    with (
+        patch.object(cli, "start_resolve_host"),
+        patch.object(cli, "start_connection"),
+        patch.object(cli, "finish_connection"),
+    ):
+        await rl.start()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    assert len(on_disconnect_called) == 0
+    assert len(on_connect_called) == 1
+    assert len(on_connect_fail_called) == 2
+    assert rl._connection_state is ReconnectLogicState.READY
+    assert rl._tries == 0
+    await rl.stop()
+    assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+
+
+async def test_reconnect_retry(
+    patchable_api_client: APIClient, caplog: pytest.LogCaptureFixture
+):
+    """Test that reconnect logic retry."""
+    on_disconnect_called = []
+    on_connect_called = []
+    on_connect_fail_called = []
+    cli = patchable_api_client
+
+    async def on_disconnect(expected_disconnect: bool) -> None:
+        nonlocal on_disconnect_called
+        on_disconnect_called.append(expected_disconnect)
+
+    async def on_connect() -> None:
+        nonlocal on_connect_called
+        on_connect_called.append(True)
+
+    async def on_connect_fail(connect_exception: Exception) -> None:
+        nonlocal on_connect_called
+        on_connect_fail_called.append(connect_exception)
+
+    rl = ReconnectLogic(
+        client=cli,
+        on_disconnect=on_disconnect,
+        on_connect=on_connect,
+        zeroconf_instance=get_mock_zeroconf(),
+        name="mydevice",
+        on_connect_error=on_connect_fail,
+    )
+    assert cli.log_name == "mydevice @ 127.0.0.1"
+    caplog.clear()
+
+    with patch.object(cli, "start_resolve_host", side_effect=APIConnectionError):
+        await rl.start()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    assert len(on_disconnect_called) == 0
+    assert len(on_connect_called) == 0
+    assert len(on_connect_fail_called) == 1
+    assert isinstance(on_connect_fail_called[-1], APIConnectionError)
+    assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+    assert "connect to ESPHome API for mydevice @ 127.0.0.1" in caplog.text
+    for record in caplog.records:
+        if "connect to ESPHome API for mydevice @ 127.0.0.1" in record.message:
+            assert record.levelno == logging.WARNING
+
+    caplog.clear()
+    # Next retry should run at debug level
+    with patch.object(cli, "start_resolve_host", side_effect=APIConnectionError):
+        # Should now retry
+        assert rl._connect_timer is not None
+        rl._connect_timer._run()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    assert len(on_disconnect_called) == 0
+    assert len(on_connect_called) == 0
+    assert len(on_connect_fail_called) == 2
+    assert isinstance(on_connect_fail_called[-1], APIConnectionError)
+    assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+    assert "connect to ESPHome API for mydevice @ 127.0.0.1" in caplog.text
+    for record in caplog.records:
+        if "connect to ESPHome API for mydevice @ 127.0.0.1" in record.message:
+            assert record.levelno == logging.DEBUG
+
+    caplog.clear()
+    with (
+        patch.object(cli, "start_resolve_host"),
+        patch.object(cli, "start_connection"),
+        patch.object(cli, "finish_connection"),
+    ):
+        # Should now retry
+        assert rl._connect_timer is not None
+        rl._connect_timer._run()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    assert "connect to ESPHome API for mydevice @ 127.0.0.1" not in caplog.text
+    assert len(on_disconnect_called) == 0
+    assert len(on_connect_called) == 1
+    assert len(on_connect_fail_called) == 2
+    assert rl._connection_state is ReconnectLogicState.READY
+    original_when = rl._connect_timer.when()
+
+    # Ensure starting the connection logic again does not trigger a new connection
+    await rl.start()
+    # Verify no new timer is started
+    assert rl._connect_timer.when() == original_when
+
+    await rl.stop()
+    assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+
+
+DNS_POINTER = DNSPointer(
+    "_esphomelib._tcp.local.",
+    _TYPE_PTR,
+    _CLASS_IN,
+    1000,
+    "mydevice._esphomelib._tcp.local.",
+)
+
+
+@pytest.mark.parametrize(
+    ("record", "should_trigger_zeroconf", "expected_state_after_trigger", "log_text"),
+    [
+        (
+            DNS_POINTER,
+            True,
+            ReconnectLogicState.READY,
+            "received mDNS record",
+        ),
+        (
+            DNSPointer(
+                "_esphomelib._tcp.local.",
+                _TYPE_PTR,
+                _CLASS_IN,
+                1000,
+                "wrong_name._esphomelib._tcp.local.",
+            ),
+            False,
+            ReconnectLogicState.RESOLVING,
+            "",
+        ),
+        (
+            DNSAddress(
+                "mydevice.local.",
+                _TYPE_A,
+                _CLASS_IN,
+                1000,
+                ip_address("127.0.0.1").packed,
+            ),
+            True,
+            ReconnectLogicState.READY,
+            "received mDNS record",
+        ),
+        (
+            DNSAddress(
+                "mydevice.local.",
+                _TYPE_AAAA,
+                _CLASS_IN,
+                1000,
+                ip_address("::1").packed,
+            ),
+            True,
+            ReconnectLogicState.READY,
+            "received mDNS record",
+        ),
+        # RFC 6762 §16: mDNS labels are case-insensitive — a device
+        # advertising mixed-case labels must still trigger the fast reconnect.
+        (
+            DNSPointer(
+                "_esphomelib._tcp.local.",
+                _TYPE_PTR,
+                _CLASS_IN,
+                1000,
+                "MyDevice._esphomelib._tcp.local.",
+            ),
+            True,
+            ReconnectLogicState.READY,
+            "received mDNS record",
+        ),
+        (
+            DNSAddress(
+                "MYDEVICE.local.",
+                _TYPE_A,
+                _CLASS_IN,
+                1000,
+                ip_address("127.0.0.1").packed,
+            ),
+            True,
+            ReconnectLogicState.READY,
+            "received mDNS record",
+        ),
+    ],
+)
+async def test_reconnect_zeroconf(  # noqa: C901  # parametrized over many record shapes; branching is the matrix
+    patchable_api_client: APIClient,
+    caplog: pytest.LogCaptureFixture,
+    record: DNSRecord,
+    should_trigger_zeroconf: bool,
+    expected_state_after_trigger: ReconnectLogicState,
+    log_text: str,
+) -> None:
+    """Test reconnect logic behavior when zeroconf provides records during connection.
+
+    This test verifies that when the reconnect logic is in RESOLVING state:
+    - If matching zeroconf records arrive, the resolution completes and connection proceeds
+    - If non-matching records arrive, the connection stays in RESOLVING state
+    """
+    cli = patchable_api_client
+    mock_zeroconf = MagicMock(spec=Zeroconf)
+
+    rl = ReconnectLogic(
+        client=cli,
+        on_disconnect=AsyncMock(),
+        on_connect=AsyncMock(),
+        zeroconf_instance=mock_zeroconf,
+        name="mydevice",
+        on_connect_error=AsyncMock(),
+    )
+    assert cli.log_name == "mydevice @ 127.0.0.1"
+
+    # First connection attempt fails
+    with patch.object(cli, "start_resolve_host", side_effect=quick_connect_fail):
+        await rl.start()
+        await asyncio.sleep(0)
+
+    # Should be disconnected after initial failure
+    assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+
+    # Create an event to coordinate resolution with zeroconf trigger
+    resolve_event = asyncio.Event()
+
+    async def resolve_host_waiting_for_zeroconf(*args, **kwargs):
+        # This simulates the resolver waiting for mDNS records
+        try:
+            await asyncio.wait_for(resolve_event.wait(), timeout=0.1)
+        except TimeoutError as err:
+            msg = "Resolution timed out"
+            raise APIConnectionError(msg) from err
+        else:
+            return  # Resolution succeeded
+
+    # For the test, we'll control when the connection succeeds
+    connect_succeeded = False
+
+    async def controlled_start_connection(*args, **kwargs):
+        nonlocal connect_succeeded
+        if should_trigger_zeroconf and resolve_event.is_set():
+            connect_succeeded = True
+            await asyncio.sleep(0)
+        else:
+            raise APIConnectionError
+
+    async def controlled_finish_connection(*args, **kwargs):
+        if connect_succeeded:
+            return
+        raise APIConnectionError
+
+    # Set up mocks for the reconnection attempt
+    with (
+        patch.object(
+            cli, "start_resolve_host", side_effect=resolve_host_waiting_for_zeroconf
+        ) as mock_resolve,
+        patch.object(
+            cli, "start_connection", side_effect=controlled_start_connection
+        ) as mock_connect,
+        patch.object(
+            cli, "finish_connection", side_effect=controlled_finish_connection
+        ) as mock_finish,
+    ):
+        # Trigger the reconnect timer
+        assert rl._connect_timer is not None
+        rl._connect_timer._run()
+        await asyncio.sleep(0)
+
+        # Should now be in RESOLVING state, waiting for mDNS records
+        assert rl._connection_state is ReconnectLogicState.RESOLVING
+        assert mock_resolve.call_count == 1
+
+        caplog.clear()
+
+        # Simulate zeroconf providing records
+        if should_trigger_zeroconf:
+            # For matching records, signal the resolver to complete
+            resolve_event.set()
+
+        rl.async_update_records(
+            mock_zeroconf, current_time_millis(), [RecordUpdate(record, None)]
+        )
+
+        # Verify the expected log message
+        assert (
+            "Triggering connect because of received mDNS record" in caplog.text
+        ) is should_trigger_zeroconf
+
+        # Give tasks time to complete
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        if should_trigger_zeroconf:
+            # Verify connection proceeded after resolution
+            assert mock_connect.call_count == 1
+            assert mock_finish.call_count == 1
+            assert log_text in caplog.text
+            assert rl._connection_state is expected_state_after_trigger
+        else:
+            # For non-matching records, should still be resolving
+            assert mock_connect.call_count == 0
+            assert mock_finish.call_count == 0
+            # The resolve task is still running, waiting for correct records
+            assert rl._connection_state is ReconnectLogicState.RESOLVING
+
+    await rl.stop()
+    assert rl._is_stopped is True
+    assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+
+
+async def test_reconnect_zeroconf_cancels_connecting_no_socket(
+    patchable_api_client: APIClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test that reconnect logic cancels and restarts connection when zeroconf triggers during CONNECTING state with no socket connected yet."""
+    cli = patchable_api_client
+
+    mock_zeroconf = MagicMock(spec=Zeroconf)
+
+    rl = ReconnectLogic(
+        client=cli,
+        on_disconnect=AsyncMock(),
+        on_connect=AsyncMock(),
+        zeroconf_instance=mock_zeroconf,
+        name="mydevice",
+        on_connect_error=AsyncMock(),
+    )
+    assert cli.log_name == "mydevice @ 127.0.0.1"
+
+    with patch.object(
+        cli, "start_resolve_host", side_effect=quick_connect_fail
+    ) as mock_start_resolve_host:
+        await rl.start()
+        await asyncio.sleep(0)
+
+    assert mock_start_resolve_host.call_count == 1
+
+    # Now put the connection in CONNECTING state (no socket connected yet)
+    with (
+        patch.object(cli, "start_resolve_host") as mock_start_resolve_host,
+        patch.object(
+            cli, "start_connection", side_effect=slow_connect_fail
+        ) as mock_start_connection,
+    ):
+        assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+        assert rl._accept_zeroconf_records is True
+        assert not rl._is_stopped
+
+        assert rl._connect_timer is not None
+        rl._connect_timer._run()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert mock_start_resolve_host.call_count == 1
+        assert mock_start_connection.call_count == 1
+        assert rl._connection_state is ReconnectLogicState.CONNECTING
+        assert rl._accept_zeroconf_records is True
+        assert not rl._is_stopped
+
+    caplog.clear()
+
+    # No socket connected yet - connected_address is None
+    assert cli.connected_address is None
+
+    # Now trigger zeroconf while in CONNECTING state with no socket
+    with (
+        patch.object(cli, "start_resolve_host") as mock_start_resolve_host_2,
+        patch.object(cli, "start_connection") as mock_start_connection_2,
+        patch.object(cli, "finish_connection"),
+    ):
+        rl.async_update_records(
+            mock_zeroconf, current_time_millis(), [RecordUpdate(DNS_POINTER, None)]
+        )
+
+        # Should see the cancellation message since no socket is connected
+        assert "Cancelling existing connect task" in caplog.text
+        assert "Triggering connect because of received mDNS record" in caplog.text
+
+        # Wait for the new connection attempt
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        # Should have started a new connection attempt
+        assert mock_start_resolve_host_2.call_count == 1
+        assert mock_start_connection_2.call_count == 1
+
+    await rl.stop()
+    assert rl._is_stopped is True
+    assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+
+
+async def test_reconnect_zeroconf_only_cancels_connecting_once(
+    patchable_api_client: APIClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Further mDNS records during a single connect attempt must not retrigger.
+
+    Regression: previously every A / PTR record cancelled the in-flight
+    CONNECTING task and restarted from RESOLVING, thrashing the connect for
+    as long as the device kept announcing itself on mDNS.
+    """
+    cli = patchable_api_client
+
+    mock_zeroconf = MagicMock(spec=Zeroconf)
+
+    rl = ReconnectLogic(
+        client=cli,
+        on_disconnect=AsyncMock(),
+        on_connect=AsyncMock(),
+        zeroconf_instance=mock_zeroconf,
+        name="mydevice",
+        on_connect_error=AsyncMock(),
+    )
+
+    with patch.object(cli, "start_resolve_host", side_effect=quick_connect_fail):
+        await rl.start()
+        await asyncio.sleep(0)
+
+    with (
+        patch.object(cli, "start_resolve_host"),
+        patch.object(cli, "start_connection", side_effect=slow_connect_fail),
+    ):
+        assert rl._connect_timer is not None
+        rl._connect_timer._run()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert rl._connection_state is ReconnectLogicState.CONNECTING
+        assert rl._accept_zeroconf_records is True
+
+    with (
+        patch.object(cli, "start_resolve_host") as mock_resolve_2,
+        patch.object(
+            cli, "start_connection", side_effect=slow_connect_fail
+        ) as mock_connect_2,
+        patch.object(cli, "finish_connection"),
+    ):
+        caplog.clear()
+        rl.async_update_records(
+            mock_zeroconf, current_time_millis(), [RecordUpdate(DNS_POINTER, None)]
+        )
+        assert (
+            caplog.text.count("Triggering connect because of received mDNS record") == 1
+        )
+        assert rl._accept_zeroconf_records is False
+
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert mock_resolve_2.call_count == 1
+        assert mock_connect_2.call_count == 1
+        assert rl._connection_state is ReconnectLogicState.CONNECTING
+
+        # Subsequent mDNS records during the same attempt must be ignored.
+        caplog.clear()
+        for _ in range(5):
+            rl.async_update_records(
+                mock_zeroconf,
+                current_time_millis(),
+                [RecordUpdate(DNS_POINTER, None)],
+            )
+        assert "Triggering connect because of received mDNS record" not in caplog.text
+        assert mock_resolve_2.call_count == 1
+        assert mock_connect_2.call_count == 1
+
+    rl._cancel_connect("forced cancel in test")
+    await rl.stop()
+    assert rl._is_stopped is True
+    assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+
+
+async def test_start_clears_stale_zeroconf_gate(
+    patchable_api_client: APIClient,
+) -> None:
+    """A stop() while the gate is closed must not leak into the next start().
+
+    If the logic is stopped mid attempt after an mDNS triggered restart,
+    _accept_zeroconf_records is False. A subsequent start() on the same
+    instance must reopen the gate, otherwise the next run would ignore
+    mDNS records until its first real failure.
+    """
+    cli = patchable_api_client
+    mock_zeroconf = MagicMock(spec=Zeroconf)
+
+    rl = ReconnectLogic(
+        client=cli,
+        on_disconnect=AsyncMock(),
+        on_connect=AsyncMock(),
+        zeroconf_instance=mock_zeroconf,
+        name="mydevice",
+        on_connect_error=AsyncMock(),
+    )
+
+    with patch.object(cli, "start_resolve_host", side_effect=quick_connect_fail):
+        await rl.start()
+        await asyncio.sleep(0)
+
+    # Simulate the stop-mid-attempt-with-closed-gate state directly.
+    rl._accept_zeroconf_records = False
+    await rl.stop()
+    assert rl._is_stopped is True
+    assert rl._accept_zeroconf_records is False
+
+    with patch.object(cli, "start_resolve_host", side_effect=quick_connect_fail):
+        await rl.start()
+        await asyncio.sleep(0)
+
+    assert rl._accept_zeroconf_records is True
+
+    await rl.stop()
+
+
+async def test_reconnect_zeroconf_does_not_cancel_connecting_with_socket(
+    patchable_api_client: APIClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test that reconnect logic does not cancel connection when zeroconf triggers during CONNECTING state with socket already connected."""
+    cli = patchable_api_client
+
+    mock_zeroconf = MagicMock(spec=Zeroconf)
+
+    rl = ReconnectLogic(
+        client=cli,
+        on_disconnect=AsyncMock(),
+        on_connect=AsyncMock(),
+        zeroconf_instance=mock_zeroconf,
+        name="mydevice",
+        on_connect_error=AsyncMock(),
+    )
+    assert cli.log_name == "mydevice @ 127.0.0.1"
+
+    with patch.object(
+        cli, "start_resolve_host", side_effect=quick_connect_fail
+    ) as mock_start_resolve_host:
+        await rl.start()
+        await asyncio.sleep(0)
+
+    assert mock_start_resolve_host.call_count == 1
+
+    # Now put the connection in CONNECTING state
+    with (
+        patch.object(cli, "start_resolve_host") as mock_start_resolve_host,
+        patch.object(
+            cli, "start_connection", side_effect=slow_connect_fail
+        ) as mock_start_connection,
+    ):
+        assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+        assert rl._accept_zeroconf_records is True
+        assert not rl._is_stopped
+
+        assert rl._connect_timer is not None
+        rl._connect_timer._run()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert mock_start_resolve_host.call_count == 1
+        assert mock_start_connection.call_count == 1
+        assert rl._connection_state is ReconnectLogicState.CONNECTING
+        assert rl._accept_zeroconf_records is True
+        assert not rl._is_stopped
+
+    caplog.clear()
+
+    # Simulate socket already connected (device accepted TCP connection)
+    with patch.object(
+        type(cli),
+        "connected_address",
+        new_callable=PropertyMock,
+        return_value="192.168.1.5",
+    ):
+        # Now trigger zeroconf while in CONNECTING state with socket connected
+        rl.async_update_records(
+            mock_zeroconf, current_time_millis(), [RecordUpdate(DNS_POINTER, None)]
+        )
+
+        # Should NOT cancel since the device already accepted the connection
+        assert "Not cancelling existing connect task" in caplog.text
+        assert "Triggering connect because of received mDNS record" in caplog.text
+        assert "Cancelling existing connect task" not in caplog.text
+
+    rl._cancel_connect("forced cancel in test")
+    await rl.stop()
+    assert rl._is_stopped is True
+    assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+
+
+async def test_reconnect_zeroconf_cancels_pending_timer(
+    patchable_api_client: APIClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test that mDNS-triggered connect cancels any pending backoff timer."""
+    cli = patchable_api_client
+
+    mock_zeroconf = MagicMock(spec=Zeroconf)
+
+    rl = ReconnectLogic(
+        client=cli,
+        on_disconnect=AsyncMock(),
+        on_connect=AsyncMock(),
+        zeroconf_instance=mock_zeroconf,
+        name="mydevice",
+        on_connect_error=AsyncMock(),
+    )
+
+    with patch.object(cli, "start_resolve_host", side_effect=quick_connect_fail):
+        await rl.start()
+        await asyncio.sleep(0)
+
+    # After first failure, a backoff timer should be scheduled
+    assert rl._connect_timer is not None
+    timer = rl._connect_timer
+
+    # Now trigger zeroconf - the pending timer should be cancelled
+    with (
+        patch.object(cli, "start_resolve_host") as mock_start_resolve_host,
+        patch.object(cli, "start_connection"),
+        patch.object(cli, "finish_connection"),
+    ):
+        rl.async_update_records(
+            mock_zeroconf, current_time_millis(), [RecordUpdate(DNS_POINTER, None)]
+        )
+
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert mock_start_resolve_host.call_count == 1
+
+    # The old timer should have been cancelled
+    assert timer.cancelled()
+
+    await rl.stop()
+    assert rl._is_stopped is True
+    assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+
+
+async def test_reconnect_zeroconf_not_while_handshaking(
+    patchable_api_client: APIClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test that reconnect logic retry will not trigger a zeroconf reconnect while handshaking."""
+    cli = patchable_api_client
+
+    mock_zeroconf = MagicMock(spec=Zeroconf)
+
+    rl = ReconnectLogic(
+        client=cli,
+        on_disconnect=AsyncMock(),
+        on_connect=AsyncMock(),
+        zeroconf_instance=mock_zeroconf,
+        name="mydevice",
+        on_connect_error=AsyncMock(),
+    )
+    assert cli.log_name == "mydevice @ 127.0.0.1"
+
+    with patch.object(
+        cli, "start_resolve_host", side_effect=quick_connect_fail
+    ) as mock_start_resolve_host:
+        await rl.start()
+        await asyncio.sleep(0)
+
+    assert mock_start_resolve_host.call_count == 1
+
+    with (
+        patch.object(cli, "start_resolve_host") as mock_start_resolve_host,
+        patch.object(cli, "start_connection") as mock_start_connection,
+        patch.object(
+            cli, "finish_connection", side_effect=slow_connect_fail
+        ) as mock_finish_connection,
+    ):
+        assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+        assert rl._accept_zeroconf_records is True
+        assert not rl._is_stopped
+
+        assert rl._connect_timer is not None
+        rl._connect_timer._run()
+        await asyncio.sleep(0)
+        assert mock_start_resolve_host.call_count == 1
+        assert mock_start_connection.call_count == 1
+        assert mock_finish_connection.call_count == 1
+        assert rl._connection_state is ReconnectLogicState.HANDSHAKING
+        assert rl._accept_zeroconf_records is True
+        assert not rl._is_stopped
+
+    rl.async_update_records(
+        mock_zeroconf, current_time_millis(), [RecordUpdate(DNS_POINTER, None)]
+    )
+    assert (
+        "Triggering connect because of received mDNS record" in caplog.text
+    ) is False
+
+    rl._cancel_connect("forced cancel in test")
+    await rl.stop()
+    assert rl._is_stopped is True
+    assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+
+
+async def test_connect_task_not_cancelled_while_handshaking(
+    patchable_api_client: APIClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test that reconnect logic will not cancel an in progress handshake."""
+    cli = patchable_api_client
+
+    rl = ReconnectLogic(
+        client=cli,
+        on_disconnect=AsyncMock(),
+        on_connect=AsyncMock(),
+        name="mydevice",
+        on_connect_error=AsyncMock(),
+    )
+    assert cli.log_name == "mydevice @ 127.0.0.1"
+
+    with patch.object(
+        cli, "start_resolve_host", side_effect=quick_connect_fail
+    ) as mock_start_resolve_host:
+        await rl.start()
+        await asyncio.sleep(0)
+
+    assert mock_start_resolve_host.call_count == 1
+
+    with (
+        patch.object(cli, "start_resolve_host") as mock_start_resolve_host,
+        patch.object(cli, "start_connection") as mock_start_connection,
+        patch.object(
+            cli, "finish_connection", side_effect=slow_connect_fail
+        ) as mock_finish_connection,
+    ):
+        assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+        assert rl._accept_zeroconf_records is True
+        assert not rl._is_stopped
+
+        assert rl._connect_timer is not None
+        rl._connect_timer._run()
+        await asyncio.sleep(0)
+        assert mock_start_resolve_host.call_count == 1
+        assert mock_start_connection.call_count == 1
+        assert mock_finish_connection.call_count == 1
+        assert rl._connection_state is ReconnectLogicState.HANDSHAKING
+        assert rl._accept_zeroconf_records is True
+        assert not rl._is_stopped
+
+    caplog.clear()
+    # This can likely never happen in practice, but we should handle it
+    # in the event there is a race as the consequence is that we could
+    # disconnect a working connection.
+    rl._call_connect_once()
+    assert (
+        "Not cancelling existing connect task as its already ReconnectLogicState.HANDSHAKING"
+        in caplog.text
+    )
+
+    rl._cancel_connect("forced cancel in test")
+    await rl.stop()
+    assert rl._is_stopped is True
+    assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+
+
+async def test_connect_aborts_if_stopped(
+    patchable_api_client: APIClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test that reconnect logic will abort connecting if stopped."""
+    cli = patchable_api_client
+
+    rl = ReconnectLogic(
+        client=cli,
+        on_disconnect=AsyncMock(),
+        on_connect=AsyncMock(),
+        name="mydevice",
+        on_connect_error=AsyncMock(),
+    )
+    assert cli.log_name == "mydevice @ 127.0.0.1"
+
+    with patch.object(
+        cli, "start_resolve_host", side_effect=quick_connect_fail
+    ) as mock_start_resolve_host:
+        await rl.start()
+        await asyncio.sleep(0)
+
+    assert mock_start_resolve_host.call_count == 1
+
+    with patch.object(cli, "start_resolve_host") as mock_start_resolve_host:
+        timer = rl._connect_timer
+        assert timer is not None
+        await rl.stop()
+        assert rl._is_stopped is True
+        rl._call_connect_once()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    # We should never try to connect again
+    # once we are stopped
+    assert mock_start_resolve_host.call_count == 0
+    assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+
+
+async def test_reconnect_logic_stop_callback(patchable_api_client: APIClient):
+    """Test that the stop_callback stops the ReconnectLogic."""
+    cli = patchable_api_client
+    rl = ReconnectLogic(
+        client=cli,
+        on_disconnect=AsyncMock(),
+        on_connect=AsyncMock(),
+        zeroconf_instance=get_mock_zeroconf(),
+        name="mydevice",
+    )
+
+    async def slow_resolve_host(*args, **kwargs):
+        await asyncio.sleep(10)  # Hang in resolve state
+
+    with patch.object(cli, "start_resolve_host", side_effect=slow_resolve_host):
+        await rl.start()
+        assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+        await asyncio.sleep(0)
+        assert rl._connection_state is ReconnectLogicState.RESOLVING
+        assert rl._is_stopped is False
+        rl.stop_callback()
+        # Wait for cancellation to propagate
+        for _ in range(4):
+            await asyncio.sleep(0)
+        assert rl._is_stopped is True
+        assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+
+
+async def test_reconnect_logic_stop_callback_waits_for_handshake(
+    patchable_api_client: APIClient,
+):
+    """Test that the stop_callback waits for a handshake."""
+    cli = patchable_api_client
+    rl = ReconnectLogic(
+        client=cli,
+        on_disconnect=AsyncMock(),
+        on_connect=AsyncMock(),
+        zeroconf_instance=get_mock_zeroconf(),
+        name="mydevice",
+    )
+    assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+
+    with (
+        patch.object(cli, "start_resolve_host"),
+        patch.object(cli, "start_connection"),
+        patch.object(cli, "finish_connection", side_effect=slow_connect_fail),
+    ):
+        await rl.start()
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+    assert rl._connection_state is ReconnectLogicState.HANDSHAKING
+    assert rl._is_stopped is False
+    rl.stop_callback()
+    # Wait for cancellation to propagate
+    for _ in range(4):
+        await asyncio.sleep(0)
+    assert rl._is_stopped is False
+    assert rl._connection_state is ReconnectLogicState.HANDSHAKING
+
+    rl._cancel_connect("forced cancel in test")
+    # Wait for cancellation to propagate
+    for _ in range(4):
+        await asyncio.sleep(0)
+    assert rl._is_stopped is True
+    assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+
+
+async def test_handling_unexpected_disconnect(aiohappyeyeballs_start_connection):
+    """Test the disconnect callback fires with expected_disconnect=False."""
+    loop = asyncio.get_running_loop()
+    protocol: APIPlaintextFrameHelper | None = None
+    transport = MagicMock()
+    connected = asyncio.Event()
+
+    class PatchableAPIClient(APIClient):
+        pass
+
+    async_zeroconf = get_mock_async_zeroconf()
+
+    cli = PatchableAPIClient(
+        address="127.0.0.1",
+        port=6052,
+        password=None,
+        noise_psk=None,
+        expected_name="fake",
+        zeroconf_instance=async_zeroconf.zeroconf,
+    )
+
+    connected = asyncio.Event()
+    on_disconnect_calls = []
+
+    async def on_disconnect(expected_disconnect: bool) -> None:
+        on_disconnect_calls.append(expected_disconnect)
+
+    async def on_connect() -> None:
+        connected.set()
+
+    logic = ReconnectLogic(
+        client=cli,
+        on_connect=on_connect,
+        on_disconnect=on_disconnect,
+        zeroconf_instance=async_zeroconf,
+        name="fake",
+    )
+
+    with patch.object(
+        loop,
+        "create_connection",
+        side_effect=partial(_create_mock_transport_protocol, transport, connected),
+    ):
+        await logic.start()
+        await connected.wait()
+        protocol = cli._connection._frame_helper
+        send_plaintext_hello(protocol)
+        send_plaintext_auth_response(protocol, False)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    assert cli._connection.is_connected is True
+    await asyncio.sleep(0)
+
+    with (
+        patch.object(
+            loop,
+            "create_connection",
+            side_effect=partial(_create_mock_transport_protocol, transport, connected),
+        ) as mock_create_connection,
+        patch.object(cli, "start_resolve_host"),
+        patch.object(cli, "start_connection"),
+        patch.object(cli, "finish_connection"),
+    ):
+        protocol.eof_received()
+        # Wait for the task to run
+        await asyncio.sleep(0)
+        # Ensure we try to reconnect immediately
+        # since its an unexpected disconnect
+        assert mock_create_connection.call_count == 0
+
+    assert len(on_disconnect_calls) == 1
+    expected_disconnect = on_disconnect_calls[-1]
+    assert expected_disconnect is False
+    await logic.stop()
+
+
+async def test_backoff_on_encryption_error(
+    caplog: pytest.LogCaptureFixture,
+    aiohappyeyeballs_start_connection,
+) -> None:
+    """Test we backoff on encryption error."""
+    loop = asyncio.get_running_loop()
+    protocol: APIPlaintextFrameHelper | None = None
+    transport = MagicMock()
+    connected = asyncio.Event()
+
+    class PatchableAPIClient(APIClient):
+        pass
+
+    async_zeroconf = get_mock_async_zeroconf()
+
+    cli = PatchableAPIClient(
+        address="127.0.0.1",
+        port=6052,
+        password=None,
+        noise_psk="",
+        expected_name="fake",
+        zeroconf_instance=async_zeroconf.zeroconf,
+    )
+
+    connected = asyncio.Event()
+    on_disconnect_calls = []
+
+    async def on_disconnect(expected_disconnect: bool) -> None:
+        on_disconnect_calls.append(expected_disconnect)
+
+    async def on_connect() -> None:
+        connected.set()
+
+    logic = ReconnectLogic(
+        client=cli,
+        on_connect=on_connect,
+        on_disconnect=on_disconnect,
+        zeroconf_instance=async_zeroconf,
+        name="fake",
+    )
+
+    with patch.object(
+        loop,
+        "create_connection",
+        side_effect=partial(_create_mock_transport_protocol, transport, connected),
+    ):
+        await logic.start()
+        await connected.wait()
+        protocol = cli._connection._frame_helper
+        mock_data_received(protocol, b"\x01\x00\x00")
+
+    assert cli._connection.is_connected is False
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert len(on_disconnect_calls) == 0
+
+    assert "Scheduling new connect attempt in 60.00 seconds" in caplog.text
+    assert "Connection requires encryption (RequiresEncryptionAPIError)" in caplog.text
+    now = loop.time()
+    assert logic._connect_timer.when() - now == pytest.approx(60, 1)
+    assert logic._tries == MAXIMUM_BACKOFF_TRIES
+    await logic.stop()
+
+
+@pytest.mark.asyncio
+async def test_plaintext_fallback_disabled_by_default(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """EncryptionPlaintextAPIError does not downgrade when flag is off."""
+
+    class PatchableAPIClient(APIClient):
+        pass
+
+    async_zeroconf = get_mock_async_zeroconf()
+    cli = PatchableAPIClient(
+        address="127.0.0.1",
+        port=6052,
+        password=None,
+        noise_psk="BASE64KEY",
+        zeroconf_instance=async_zeroconf.zeroconf,
+    )
+
+    async def on_connect() -> None: ...
+    async def on_disconnect(expected_disconnect: bool) -> None: ...
+
+    rl = ReconnectLogic(
+        client=cli,
+        on_connect=on_connect,
+        on_disconnect=on_disconnect,
+        zeroconf_instance=async_zeroconf,
+        name="fake",
+    )
+
+    with (
+        patch.object(cli, "start_resolve_host"),
+        patch.object(cli, "start_connection"),
+        patch.object(
+            cli,
+            "finish_connection",
+            side_effect=EncryptionPlaintextAPIError("plaintext"),
+        ),
+    ):
+        await rl.start()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    assert cli.noise_psk == "BASE64KEY"
+    # Non-auth error: tries increments by 1, no max backoff.
+    assert rl._tries == 1
+    assert "disabling encryption" not in caplog.text
+    await rl.stop()
+
+
+@pytest.mark.asyncio
+async def test_plaintext_fallback_downgrades_when_enabled(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """With opt-in, plaintext protocol downgrades the PSK and resets tries."""
+
+    class PatchableAPIClient(APIClient):
+        pass
+
+    async_zeroconf = get_mock_async_zeroconf()
+    cli = PatchableAPIClient(
+        address="127.0.0.1",
+        port=6052,
+        password=None,
+        noise_psk="BASE64KEY",
+        zeroconf_instance=async_zeroconf.zeroconf,
+    )
+
+    async def on_connect() -> None: ...
+    async def on_disconnect(expected_disconnect: bool) -> None: ...
+
+    rl = ReconnectLogic(
+        client=cli,
+        on_connect=on_connect,
+        on_disconnect=on_disconnect,
+        zeroconf_instance=async_zeroconf,
+        name="fake",
+        allow_plaintext_fallback=True,
+    )
+
+    with (
+        patch.object(cli, "start_resolve_host"),
+        patch.object(cli, "start_connection"),
+        patch.object(
+            cli,
+            "finish_connection",
+            side_effect=EncryptionPlaintextAPIError("plaintext"),
+        ),
+    ):
+        await rl.start()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    assert cli.noise_psk is None
+    assert rl._tries == 0
+    assert "Device is using plaintext protocol" in caplog.text
+    await rl.stop()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_logic_no_zeroconf_listener_for_ip_addresses(
+    patchable_api_client: APIClient,
+) -> None:
+    """Test that zeroconf listener is not started for IP addresses."""
+    cli = patchable_api_client
+
+    # Mock get_async_zeroconf to raise - this ensures it's not called for IP addresses
+    with patch.object(
+        cli.zeroconf_manager,
+        "get_async_zeroconf",
+        side_effect=Exception("Should not create zeroconf instance for IP addresses"),
+    ):
+        # Test with IP address as name - should not raise
+        logic_with_ip = ReconnectLogic(
+            client=cli,
+            on_connect=AsyncMock(),
+            on_disconnect=AsyncMock(),
+            name="192.168.1.100",  # IP address
+        )
+
+        # This should work without calling get_async_zeroconf
+        await logic_with_ip.start()
+        await asyncio.sleep(0)
+        await logic_with_ip.stop()
+
+        # Test with IP:port as name - should not raise
+        logic_with_ip_port = ReconnectLogic(
+            client=cli,
+            on_connect=AsyncMock(),
+            on_disconnect=AsyncMock(),
+            name="127.0.0.1:6053",  # IP address with port
+        )
+
+        await logic_with_ip_port.start()
+        await asyncio.sleep(0)
+        await logic_with_ip_port.stop()
+
+    # Now test with a real device name - this SHOULD call get_async_zeroconf
+    async_zeroconf = get_mock_async_zeroconf()
+
+    with patch.object(
+        cli.zeroconf_manager, "get_async_zeroconf", return_value=async_zeroconf
+    ) as mock_get_zc:
+        logic_with_name = ReconnectLogic(
+            client=cli,
+            on_connect=AsyncMock(),
+            on_disconnect=AsyncMock(),
+            name="living_room",  # Device name
+        )
+
+        await logic_with_name.start()
+        await asyncio.sleep(0)
+
+        # Should have called get_async_zeroconf for device name
+        mock_get_zc.assert_called()
+
+        await logic_with_name.stop()
+
+
+@pytest.mark.asyncio
+async def test_connection_cancelled_error_logged_at_debug_level(
+    patchable_api_client: APIClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test that APIConnectionCancelledError is always logged at DEBUG level."""
+    on_connect = AsyncMock()
+    on_disconnect = AsyncMock()
+    on_connect_fail = AsyncMock()
+
+    logic = ReconnectLogic(
+        client=patchable_api_client,
+        on_connect=on_connect,
+        on_disconnect=on_disconnect,
+        on_connect_error=on_connect_fail,
+        name="mydevice",
+    )
+
+    caplog.clear()
+    # First attempt - APIConnectionCancelledError should be DEBUG even on first try
+    with patch.object(
+        patchable_api_client,
+        "start_resolve_host",
+        side_effect=APIConnectionCancelledError("Starting connection cancelled"),
+    ):
+        await logic.start()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    assert len(on_connect_fail.call_args_list) == 1
+    assert isinstance(
+        on_connect_fail.call_args_list[0][0][0], APIConnectionCancelledError
+    )
+
+    # Check that the error was logged at DEBUG level, not WARNING
+    log_record = find_log_with_message(caplog, "Can't connect to ESPHome API")
+    assert log_record is not None, "Expected log message not found"
+    assert "APIConnectionCancelledError" in log_record.message
+    assert log_record.levelno == logging.DEBUG
+
+    await logic.stop()
+
+
+@pytest.mark.asyncio
+async def test_resolved_log_level_changes_after_first_attempt(
+    patchable_api_client: APIClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test that 'Successfully resolved' is logged at INFO on first attempt, DEBUG on subsequent."""
+    on_connect = AsyncMock()
+    on_disconnect = AsyncMock()
+    on_connect_fail = AsyncMock()
+
+    logic = ReconnectLogic(
+        client=patchable_api_client,
+        on_connect=on_connect,
+        on_disconnect=on_disconnect,
+        on_connect_error=on_connect_fail,
+        name="mydevice",
+    )
+
+    caplog.clear()
+    # First attempt - should be INFO level
+    with (
+        patch.object(patchable_api_client, "start_resolve_host"),
+        patch.object(
+            patchable_api_client,
+            "start_connection",
+            side_effect=APIConnectionError("Connection failed"),
+        ),
+    ):
+        await logic.start()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    # Check that the resolved message was logged at INFO level on first attempt
+    log_record = find_log_with_message(caplog, "Successfully resolved")
+    assert log_record is not None, (
+        "Expected INFO log message not found on first attempt"
+    )
+    assert log_record.levelno == logging.INFO
+
+    caplog.clear()
+    # Second attempt - should be DEBUG level
+    with (
+        patch.object(patchable_api_client, "start_resolve_host"),
+        patch.object(
+            patchable_api_client,
+            "start_connection",
+            side_effect=APIConnectionError("Connection failed"),
+        ),
+    ):
+        # Trigger the next connection attempt
+        assert logic._connect_timer is not None
+        logic._connect_timer._run()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    # Check that the resolved message was logged at DEBUG level on second attempt
+    log_record = find_log_with_message(caplog, "Successfully resolved")
+    assert log_record is not None, (
+        "Expected DEBUG log message not found on subsequent attempt"
+    )
+    assert log_record.levelno == logging.DEBUG
+
+    await logic.stop()
+
+
+@pytest.mark.asyncio
+async def test_zc_listen_failure_does_not_block_connect(
+    patchable_api_client: APIClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Connect must proceed when zeroconf init fails (issue #1613, BSD port 5353)."""
+    cli = patchable_api_client
+    on_connect = AsyncMock()
+    on_disconnect = AsyncMock()
+    on_connect_fail = AsyncMock()
+
+    logic = ReconnectLogic(
+        client=cli,
+        on_connect=on_connect,
+        on_disconnect=on_disconnect,
+        on_connect_error=on_connect_fail,
+        name="mydevice",
+    )
+
+    caplog.clear()
+    with (
+        patch.object(
+            cli.zeroconf_manager,
+            "get_async_zeroconf",
+            side_effect=OSError(48, "Address already in use"),
+        ),
+        patch.object(cli, "start_resolve_host"),
+        patch.object(cli, "start_connection"),
+        patch.object(cli, "finish_connection"),
+    ):
+        await logic.start()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    # The connection should have succeeded despite the zeroconf failure.
+    assert on_connect.call_count == 1
+    assert on_connect_fail.call_count == 0
+    assert logic._connection_state is ReconnectLogicState.READY
+    # The zeroconf failure should have been logged as a warning on the first try.
+    log_record = find_log_with_message(caplog, "Could not start zeroconf listener")
+    assert log_record is not None, "Expected zeroconf failure warning was not logged"
+    assert log_record.levelno == logging.WARNING
+    # _zc_listening must remain False so stop() doesn't try to remove a listener
+    # we never added.
+    assert logic._zc_listening is False
+
+    await logic.stop()
+
+
+@pytest.mark.asyncio
+async def test_zc_listen_failure_downgrades_to_debug_after_first_try(
+    patchable_api_client: APIClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Repeated zeroconf init failures must not spam WARNING (Copilot review on #1652)."""
+    cli = patchable_api_client
+    logic = ReconnectLogic(
+        client=cli,
+        on_connect=AsyncMock(),
+        on_disconnect=AsyncMock(),
+        on_connect_error=AsyncMock(),
+        name="mydevice",
+    )
+
+    # Drive a non-zero _tries by failing the first resolve; this mirrors the
+    # "zeroconf keeps failing across reconnect attempts" scenario.
+    with (
+        patch.object(
+            cli.zeroconf_manager,
+            "get_async_zeroconf",
+            side_effect=OSError(48, "Address already in use"),
+        ),
+        patch.object(cli, "start_resolve_host", side_effect=APIConnectionError),
+    ):
+        await logic.start()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert logic._tries == 1
+
+        caplog.clear()
+        assert logic._connect_timer is not None
+        logic._connect_timer._run()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    log_record = find_log_with_message(caplog, "Could not start zeroconf listener")
+    assert log_record is not None, "Expected zeroconf failure log was not emitted"
+    assert log_record.levelno == logging.DEBUG
+
+    await logic.stop()

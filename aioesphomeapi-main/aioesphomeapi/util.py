@@ -1,0 +1,135 @@
+from __future__ import annotations
+
+from asyncio import (
+    AbstractEventLoop,
+    Task,
+    get_running_loop,
+    timeout as asyncio_timeout,
+)
+import ipaddress
+import math
+import sys
+from typing import TYPE_CHECKING, Any, TypeVar
+
+if TYPE_CHECKING:
+    from collections.abc import Coroutine
+
+_T = TypeVar("_T")
+
+
+def fix_float_single_double_conversion(value: float) -> float:
+    """Restore precision of a single-precision float carried over a double.
+
+    In ESPHome we work with single-precision floats internally for performance.
+    But python uses double-precision floats, and when protobuf reads the message
+    it's auto-converted to a double (which is possible losslessly).
+
+    Unfortunately the float representation of 0.1 converted to a double is not the
+    double representation of 0.1, but 0.10000000149011612.
+
+    This methods tries to round to the closest decimal value that a float of this
+    magnitude can accurately represent.
+    """
+    if value == 0 or not math.isfinite(value):
+        return value
+    abs_val = abs(value)
+    # assume ~7 decimals of precision for floats to be safe
+    l10 = math.ceil(math.log10(abs_val))
+    prec = 7 - l10
+    return round(value, prec)
+
+
+def host_is_name_part(address: str) -> bool:
+    """Return True if a host is the name part."""
+    return "." not in address and ":" not in address
+
+
+def address_is_local(address: str) -> bool:
+    """Return True if the address is a local address."""
+    return address.removesuffix(".").lower().endswith(".local")
+
+
+def is_ip_address(address: str | None) -> bool:
+    """Return True if the address is an IP address.
+
+    Handles IPv4 with or without port ("192.168.1.1", "192.168.1.1:6053"),
+    bare IPv6 ("::1", "2001:db8::1") and bracketed IPv6 with optional port
+    ("[::1]", "[::1]:6053"). Returns False if address is None.
+    """
+    if address is None:
+        return False
+    if address.startswith("["):
+        end = address.find("]")
+        if end == -1:
+            return False
+        suffix = address[end + 1 :]
+        if suffix and not suffix.startswith(":"):
+            return False
+        address = address[1:end]
+    elif address.count(":") == 1:
+        address = address.partition(":")[0]
+    try:
+        ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return True
+
+
+def build_log_name(
+    name: str | None, addresses: list[str], connected_address: str | None
+) -> str:
+    """Return a log name for a connection."""
+    preferred_address = connected_address
+    for address in addresses:
+        if (not name and address_is_local(address)) or host_is_name_part(address):
+            name = address.partition(".")[0]
+        elif not preferred_address:
+            preferred_address = address
+    if not preferred_address:
+        return name or addresses[0]
+    if (
+        name
+        and name.lower() != preferred_address.lower()
+        and not preferred_address.lower().startswith(f"{name.lower()}.")
+    ):
+        return f"{name} @ {preferred_address}"
+    return preferred_address
+
+
+if sys.version_info >= (3, 12, 0):
+
+    def create_eager_task(
+        coro: Coroutine[Any, Any, _T],
+        *,
+        name: str | None = None,
+        loop: AbstractEventLoop | None = None,
+    ) -> Task[_T]:
+        """Create a task from a coroutine and schedule it to run immediately."""
+        return Task(
+            coro,
+            loop=loop or get_running_loop(),
+            name=name,
+            eager_start=True,  # type: ignore[call-arg]
+        )
+
+else:
+
+    def create_eager_task(
+        coro: Coroutine[Any, Any, _T],
+        *,
+        name: str | None = None,
+        loop: AbstractEventLoop | None = None,
+    ) -> Task[_T]:
+        """Create a task from a coroutine."""
+        return Task(coro, loop=loop or get_running_loop(), name=name)
+
+
+__all__ = (
+    "address_is_local",
+    "asyncio_timeout",
+    "build_log_name",
+    "create_eager_task",
+    "fix_float_single_double_conversion",
+    "host_is_name_part",
+    "is_ip_address",
+)

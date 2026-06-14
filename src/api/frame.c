@@ -12,7 +12,7 @@
 // ---------------------------------------------------------------------------
 struct esph_session {
     int sock;
-    esph_noise_ctx_t noise;
+    esph_noise_ctx_t *noise;
 };
 
 // ---------------------------------------------------------------------------
@@ -22,10 +22,10 @@ int esph_frame_send(esph_session_t *s,
                     const uint8_t *plaintext, size_t plen)
 {
     uint8_t encbuf[2048];
-    size_t enc_len = 0;
+    size_t enc_len = sizeof(encbuf);
 
     // Encrypt using Noise transport key
-    if (esph_noise_encrypt(&s->noise,
+    if (esph_noise_encrypt(s->noise,
                            plaintext, plen,
                            encbuf, &enc_len) != 0) {
         fprintf(stderr, "[FRAME] encrypt failed\n");
@@ -83,7 +83,7 @@ int esph_frame_recv(esph_session_t *s,
     }
 
     // Decrypt using Noise transport key
-    if (esph_noise_decrypt(&s->noise,
+    if (esph_noise_decrypt(s->noise,
                            encbuf, enc_len,
                            out, out_len) != 0) {
         fprintf(stderr, "[FRAME] decrypt failed\n");

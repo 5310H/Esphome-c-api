@@ -1,0 +1,1396 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import sys
+from typing import TYPE_CHECKING, Any
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+from aioesphomeapi import APIConnection, EncryptionPlaintextAPIError
+from aioesphomeapi._frame_helper.base import safe_label_str
+from aioesphomeapi._frame_helper.noise import MAX_NAME_LEN, APINoiseFrameHelper
+from aioesphomeapi._frame_helper.noise_encryption import EncryptCipher
+from aioesphomeapi._frame_helper.packets import (
+    _cached_varuint_to_bytes as cached_varuint_to_bytes,
+    _varuint_to_bytes as varuint_to_bytes,
+)
+from aioesphomeapi._frame_helper.plain_text import (
+    MAX_PLAINTEXT_FRAME_SIZE,
+    APIPlaintextFrameHelper,
+)
+from aioesphomeapi.connection import ConnectionState
+from aioesphomeapi.core import (
+    APIConnectionError,
+    BadMACAddressAPIError,
+    BadNameAPIError,
+    EncryptionHelloAPIError,
+    HandshakeAPIError,
+    InvalidEncryptionKeyAPIError,
+    ProtocolAPIError,
+    ReadFailedAPIError,
+    SocketClosedAPIError,
+)
+
+from .common import (
+    PREAMBLE,
+    MockAPINoiseFrameHelper,
+    _extract_encrypted_payload_from_handshake,
+    _make_encrypted_packet,
+    _make_encrypted_packet_from_encrypted_payload,
+    _make_mock_connection,
+    _make_noise_handshake_pkt,
+    _make_noise_hello_pkt,
+    _mock_responder_proto,
+    get_mock_protocol,
+    mock_data_received,
+)
+
+_PLAINTEXT_TESTS = [
+    (PREAMBLE + varuint_to_bytes(0) + varuint_to_bytes(1), b"", 1),
+    (
+        PREAMBLE + varuint_to_bytes(192) + varuint_to_bytes(1) + (b"\x42" * 192),
+        (b"\x42" * 192),
+        1,
+    ),
+    (
+        PREAMBLE + varuint_to_bytes(192) + varuint_to_bytes(100) + (b"\x42" * 192),
+        (b"\x42" * 192),
+        100,
+    ),
+    (
+        PREAMBLE + varuint_to_bytes(4) + varuint_to_bytes(100) + (b"\x42" * 4),
+        (b"\x42" * 4),
+        100,
+    ),
+    (
+        PREAMBLE + varuint_to_bytes(8192) + varuint_to_bytes(8192) + (b"\x42" * 8192),
+        (b"\x42" * 8192),
+        8192,
+    ),
+    (
+        PREAMBLE + varuint_to_bytes(256) + varuint_to_bytes(256) + (b"\x42" * 256),
+        (b"\x42" * 256),
+        256,
+    ),
+]
+if sys.platform != "win32":
+    # pytest sets name of the test as an env var as win32 has a max char
+    # limit that will cause the test to fail
+    _PLAINTEXT_TESTS.extend(
+        [
+            (
+                PREAMBLE + varuint_to_bytes(1) + varuint_to_bytes(32768) + b"\x42",
+                b"\x42",
+                32768,
+            ),
+            (
+                PREAMBLE
+                + varuint_to_bytes(32768)
+                + varuint_to_bytes(32768)
+                + (b"\x42" * 32768),
+                (b"\x42" * 32768),
+                32768,
+            ),
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    ("in_bytes", "pkt_data", "pkt_type"),
+    _PLAINTEXT_TESTS,
+)
+async def test_plaintext_frame_helper(
+    in_bytes: bytes, pkt_data: bytes, pkt_type: int
+) -> None:
+    for _ in range(3):
+        connection, packets = _make_mock_connection()
+        helper = APIPlaintextFrameHelper(
+            connection=connection, client_info="my client", log_name="test"
+        )
+
+        mock_data_received(helper, in_bytes)
+
+        pkt = packets.pop()
+        type_, data = pkt
+
+        assert type_ == pkt_type
+        assert data == pkt_data
+
+        # Make sure we correctly handle fragments
+        for i in range(len(in_bytes)):
+            mock_data_received(helper, in_bytes[i : i + 1])
+
+        pkt = packets.pop()
+        type_, data = pkt
+
+        assert type_ == pkt_type
+        assert data == pkt_data
+        helper.close()
+
+
+@pytest.mark.parametrize(
+    ("in_bytes", "pkt_data", "pkt_type"),
+    _PLAINTEXT_TESTS,
+)
+async def test_plaintext_frame_helper_multiple_payloads_single_packet(
+    in_bytes: bytes, pkt_data: bytes, pkt_type: int
+) -> None:
+    for _ in range(3):
+        connection, packets = _make_mock_connection()
+        helper = APIPlaintextFrameHelper(
+            connection=connection, client_info="my client", log_name="test"
+        )
+
+        mock_data_received(helper, in_bytes)
+
+        pkt = packets.pop()
+        type_, data = pkt
+
+        assert type_ == pkt_type
+        assert data == pkt_data
+
+        # Make sure we correctly handle multiple payloads in a single packet
+        mock_data_received(helper, in_bytes * 5)
+
+        for _ in range(5):
+            pkt = packets.pop()
+            type_, data = pkt
+
+            assert type_ == pkt_type
+            assert data == pkt_data
+
+        helper.close()
+
+
+@pytest.mark.parametrize(
+    "byte_type",
+    [bytes, bytearray, memoryview],
+)
+async def test_plaintext_frame_helper_protractor_event_loop(byte_type: Any) -> None:
+    """Test the plaintext frame helper with the protractor event loop.
+
+    With the protractor event loop, data_received is called with a bytearray
+    instead of bytes.
+
+    https://github.com/esphome/issues/issues/5117
+    """
+    for _ in range(3):
+        connection, packets = _make_mock_connection()
+        helper = APIPlaintextFrameHelper(
+            connection=connection, client_info="my client", log_name="test"
+        )
+        in_bytes = byte_type(
+            PREAMBLE + varuint_to_bytes(4) + varuint_to_bytes(100) + (b"\x42" * 4)
+        )
+
+        mock_data_received(helper, in_bytes)
+
+        pkt = packets.pop()
+        type_, data = pkt
+
+        assert type_ == 100
+        assert data == b"\x42" * 4
+
+        # Make sure we correctly handle fragments
+        for i in range(len(in_bytes)):
+            mock_data_received(helper, in_bytes[i : i + 1])
+
+        pkt = packets.pop()
+        type_, data = pkt
+
+        assert type_ == 100
+        assert data == b"\x42" * 4
+
+
+@pytest.mark.parametrize(
+    "byte_type",
+    [bytes, bytearray, memoryview],
+)
+async def test_noise_protector_event_loop(byte_type: Any) -> None:
+    """Test the noise frame helper with the protractor event loop.
+
+    With the protractor event loop, data_received is called with a bytearray
+    instead of bytes.
+
+    https://github.com/esphome/issues/issues/5117
+    """
+    outgoing_packets = [
+        "010000",  # hello packet
+        "010031001ed7f7bb0b74085418258ed5928931bc36ade7cf06937fcff089044d4ab142643f1b2c9935bb77696f23d930836737a4",
+    ]
+    incoming_packets = [
+        "01000d01736572766963657465737400",
+        "0100160148616e647368616b65204d4143206661696c757265",
+    ]
+    connection, _ = _make_mock_connection()
+
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk="QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc=",
+        expected_name="servicetest",
+        client_info="my client",
+        log_name="test",
+        expected_mac=None,
+    )
+
+    for pkt in outgoing_packets:
+        helper.mock_write_frame(byte_type(bytes.fromhex(pkt)))
+
+    for pkt in incoming_packets:
+        mock_data_received(helper, byte_type(bytes.fromhex(pkt)))
+
+    with pytest.raises(InvalidEncryptionKeyAPIError):
+        await helper.ready_future
+
+
+async def test_noise_frame_helper_incorrect_key():
+    """Test that the noise frame helper raises InvalidEncryptionKeyAPIError on bad key."""
+    outgoing_packets = [
+        "010000",  # hello packet
+        "010031001ed7f7bb0b74085418258ed5928931bc36ade7cf06937fcff089044d4ab142643f1b2c9935bb77696f23d930836737a4",
+    ]
+    incoming_packets = [
+        "01000d01736572766963657465737400",
+        "0100160148616e647368616b65204d4143206661696c757265",
+    ]
+    connection, _ = _make_mock_connection()
+
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk="QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc=",
+        expected_name="servicetest",
+        client_info="my client",
+        log_name="test",
+        expected_mac=None,
+    )
+
+    for pkt in outgoing_packets:
+        helper.mock_write_frame(bytes.fromhex(pkt))
+
+    for pkt in incoming_packets:
+        mock_data_received(helper, bytes.fromhex(pkt))
+
+    with pytest.raises(InvalidEncryptionKeyAPIError):
+        await helper.ready_future
+
+
+async def test_noise_frame_helper_incorrect_key_fragments():
+    """Test that the noise frame helper raises InvalidEncryptionKeyAPIError on bad key with fragmented packets."""
+    outgoing_packets = [
+        "010000",  # hello packet
+        "010031001ed7f7bb0b74085418258ed5928931bc36ade7cf06937fcff089044d4ab142643f1b2c9935bb77696f23d930836737a4",
+    ]
+    incoming_packets = [
+        "01000d01736572766963657465737400",
+        "0100160148616e647368616b65204d4143206661696c757265",
+    ]
+    connection, _ = _make_mock_connection()
+
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk="QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc=",
+        expected_name="servicetest",
+        client_info="my client",
+        log_name="test",
+        expected_mac=None,
+    )
+
+    for pkt in outgoing_packets:
+        helper.mock_write_frame(bytes.fromhex(pkt))
+
+    for pkt in incoming_packets:
+        in_pkt = bytes.fromhex(pkt)
+        for i in range(len(in_pkt)):
+            mock_data_received(helper, in_pkt[i : i + 1])
+
+    with pytest.raises(InvalidEncryptionKeyAPIError):
+        await helper.ready_future
+
+
+async def test_noise_incorrect_name():
+    """Test we raise on bad name."""
+    outgoing_packets = [
+        "010000",  # hello packet
+        "010031001ed7f7bb0b74085418258ed5928931bc36ade7cf06937fcff089044d4ab142643f1b2c9935bb77696f23d930836737a4",
+    ]
+    incoming_packets = [
+        "01000d01736572766963657465737400",
+        "0100160148616e647368616b65204d4143206661696c757265",
+    ]
+    connection, _ = _make_mock_connection()
+
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk="QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc=",
+        expected_name="wrongname",
+        client_info="my client",
+        log_name="test",
+        expected_mac=None,
+    )
+
+    for pkt in outgoing_packets:
+        helper.mock_write_frame(bytes.fromhex(pkt))
+
+    for pkt in incoming_packets:
+        mock_data_received(helper, bytes.fromhex(pkt))
+
+    with pytest.raises(BadNameAPIError) as exc_info:
+        await helper.ready_future
+    assert exc_info.value.received_name == "servicetest"
+
+
+async def test_noise_incorrect_mac():
+    """Test we raise on bad name."""
+    outgoing_packets = [
+        "010000",  # hello packet
+        "010031001ed7f7bb0b74085418258ed5928931bc36ade7cf06937fcff089044d4ab142643f1b2c9935bb77696f23d930836737a4",
+    ]
+    incoming_packets = [
+        "01001f01706f6f6c686f757365383170726f78790032343463616230363439396300",
+        "0100160148616e647368616b65204d4143206661696c757265",
+    ]
+    connection, _ = _make_mock_connection()
+
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk="QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc=",
+        expected_name="poolhouse81proxy",
+        client_info="my client",
+        log_name="test",
+        expected_mac="aabbccddeeff",
+    )
+
+    for pkt in outgoing_packets:
+        helper.mock_write_frame(bytes.fromhex(pkt))
+
+    for pkt in incoming_packets:
+        mock_data_received(helper, bytes.fromhex(pkt))
+
+    with pytest.raises(BadMACAddressAPIError) as exc_info:
+        await helper.ready_future
+    assert exc_info.value.received_name == "poolhouse81proxy"
+    assert exc_info.value.received_mac == "244cab06499c"
+
+
+async def test_noise_mac_in_exception():
+    """Test the mac is in the exception when the key is wrong if available."""
+    outgoing_packets = [
+        "010000",  # hello packet
+        "010031001ed7f7bb0b74085418258ed5928931bc36ade7cf06937fcff089044d4ab142643f1b2c9935bb77696f23d930836737a4",
+    ]
+    incoming_packets = [
+        "01001f01706f6f6c686f757365383170726f78790032343463616230363439396300",
+        "0100160148616e647368616b65204d4143206661696c757265",
+    ]
+    connection, _ = _make_mock_connection()
+
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk="QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc=",
+        expected_name="poolhouse81proxy",
+        client_info="my client",
+        log_name="test",
+        expected_mac=None,
+    )
+
+    for pkt in outgoing_packets:
+        helper.mock_write_frame(bytes.fromhex(pkt))
+
+    for pkt in incoming_packets:
+        mock_data_received(helper, bytes.fromhex(pkt))
+
+    with pytest.raises(InvalidEncryptionKeyAPIError) as exc_info:
+        await helper.ready_future
+    assert exc_info.value.received_name == "poolhouse81proxy"
+    assert exc_info.value.received_mac == "244cab06499c"
+
+
+VARUINT_TESTCASES = [
+    (0, b"\x00"),
+    (42, b"\x2a"),
+    (127, b"\x7f"),
+    (128, b"\x80\x01"),
+    (300, b"\xac\x02"),
+    (65536, b"\x80\x80\x04"),
+]
+
+
+@pytest.mark.parametrize(("val", "encoded"), VARUINT_TESTCASES)
+def test_varuint_to_bytes(val, encoded):
+    assert varuint_to_bytes(val) == encoded
+    assert cached_varuint_to_bytes(val) == encoded
+
+
+async def test_noise_frame_helper_handshake_failure():
+    """Test the noise frame helper handshake failure."""
+    noise_psk = "QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc="
+    psk_bytes = base64.b64decode(noise_psk)
+    writes = []
+
+    def _writelines(data: Iterable[bytes]):
+        writes.append(b"".join(data))
+
+    connection, _ = _make_mock_connection()
+
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk=noise_psk,
+        expected_name="servicetest",
+        client_info="my client",
+        log_name="test",
+        writer=_writelines,
+        expected_mac=None,
+    )
+
+    proto = _mock_responder_proto(psk_bytes)
+
+    await asyncio.sleep(0)  # let the task run to read the hello packet
+
+    assert len(writes) == 1
+    handshake_pkt = writes.pop()
+    encrypted_payload = _extract_encrypted_payload_from_handshake(handshake_pkt)
+
+    decrypted = proto.read_message(encrypted_payload)
+    assert decrypted == b""
+
+    hello_pkt_with_header = _make_noise_hello_pkt(b"\x01servicetest\0")
+    mock_data_received(helper, hello_pkt_with_header)
+
+    error_pkt = b"\x01forced to fail"
+    preamble = 1
+    error_pkg_length = len(error_pkt)
+    error_pkg_length_high = (error_pkg_length >> 8) & 0xFF
+    error_pkg_length_low = error_pkg_length & 0xFF
+    error_header = bytes((preamble, error_pkg_length_high, error_pkg_length_low))
+    error_pkt_with_header = error_header + error_pkt
+
+    mock_data_received(helper, error_pkt_with_header)
+
+    with pytest.raises(HandshakeAPIError, match="forced to fail"):
+        await helper.ready_future
+
+
+async def test_noise_frame_helper_handshake_success_with_single_packet():
+    """Test the noise frame helper handshake success with a single packet."""
+    noise_psk = "QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc="
+    psk_bytes = base64.b64decode(noise_psk)
+    writes = []
+
+    def _writelines(data: Iterable[bytes]):
+        writes.append(b"".join(data))
+
+    connection, packets = _make_mock_connection()
+
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk=noise_psk,
+        expected_name="servicetest",
+        client_info="my client",
+        log_name="test",
+        writer=_writelines,
+        expected_mac=None,
+    )
+
+    proto = _mock_responder_proto(psk_bytes)
+
+    await asyncio.sleep(0)  # let the task run to read the hello packet
+
+    assert len(writes) == 1
+    handshake_pkt = writes.pop()
+
+    encrypted_payload = _extract_encrypted_payload_from_handshake(handshake_pkt)
+    decrypted = proto.read_message(encrypted_payload)
+    assert decrypted == b""
+
+    hello_pkt_with_header = _make_noise_hello_pkt(b"\x01servicetest\0")
+    mock_data_received(helper, hello_pkt_with_header)
+
+    handshake_with_header = _make_noise_handshake_pkt(proto)
+    mock_data_received(helper, handshake_with_header)
+
+    assert not writes
+
+    await helper.ready_future
+    helper.write_packets([(1, b"to device")], True)
+    encrypted_packet = writes.pop()
+    header = encrypted_packet[0:1]
+    assert header == b"\x01"
+    pkg_length_high = encrypted_packet[1]
+    pkg_length_low = encrypted_packet[2]
+    pkg_length = (pkg_length_high << 8) + pkg_length_low
+    assert len(encrypted_packet) == 3 + pkg_length
+
+    encrypt_cipher = EncryptCipher(proto.noise_protocol.cipher_state_encrypt)
+    encrypted_packet = _make_encrypted_packet(encrypt_cipher, 42, b"from device")
+
+    mock_data_received(helper, encrypted_packet)
+
+    assert packets == [(42, b"from device")]
+    helper.close()
+
+    mock_data_received(helper, encrypted_packet)
+
+
+async def test_noise_valid_encryption_invalid_payload(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test the noise with a packet that decrypts but is missing part of the payload."""
+    noise_psk = "QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc="
+    psk_bytes = base64.b64decode(noise_psk)
+    writes = []
+
+    def _writelines(data: Iterable[bytes]):
+        writes.append(b"".join(data))
+
+    connection, packets = _make_mock_connection()
+
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk=noise_psk,
+        expected_name="servicetest",
+        client_info="my client",
+        log_name="test",
+        writer=_writelines,
+        expected_mac=None,
+    )
+
+    proto = _mock_responder_proto(psk_bytes)
+
+    await asyncio.sleep(0)  # let the task run to read the hello packet
+
+    assert len(writes) == 1
+    handshake_pkt = writes.pop()
+
+    encrypted_payload = _extract_encrypted_payload_from_handshake(handshake_pkt)
+    decrypted = proto.read_message(encrypted_payload)
+    assert decrypted == b""
+
+    hello_pkt_with_header = _make_noise_hello_pkt(b"\x01servicetest\0")
+    mock_data_received(helper, hello_pkt_with_header)
+
+    handshake_with_header = _make_noise_handshake_pkt(proto)
+    mock_data_received(helper, handshake_with_header)
+
+    assert not writes
+
+    await helper.ready_future
+    helper.write_packets([(1, b"to device")], True)
+    encrypted_packet = writes.pop()
+    header = encrypted_packet[0:1]
+    assert header == b"\x01"
+    pkg_length_high = encrypted_packet[1]
+    pkg_length_low = encrypted_packet[2]
+    pkg_length = (pkg_length_high << 8) + pkg_length_low
+    assert len(encrypted_packet) == 3 + pkg_length
+
+    msg_type = 42
+    msg_type_high = (msg_type >> 8) & 0xFF
+    msg_type_low = msg_type & 0xFF
+    # Trim the pre-encrypted payload to be missing the message length and payload
+    encrypted_payload = proto.encrypt(bytes((msg_type_high, msg_type_low)))
+    encrypted_packet = _make_encrypted_packet_from_encrypted_payload(encrypted_payload)
+
+    mock_data_received(helper, encrypted_packet)
+
+    assert packets == []
+    assert connection.is_connected is False
+    assert "Decrypted message too short" in caplog.text
+    helper.close()
+
+
+async def test_noise_valid_encryption_payload_short(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test the noise with a packet that has a short encrypted payload."""
+    noise_psk = "QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc="
+    psk_bytes = base64.b64decode(noise_psk)
+    writes = []
+
+    def _writelines(data: Iterable[bytes]):
+        writes.append(b"".join(data))
+
+    connection, packets = _make_mock_connection()
+
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk=noise_psk,
+        expected_name="servicetest",
+        client_info="my client",
+        log_name="test",
+        writer=_writelines,
+        expected_mac=None,
+    )
+
+    proto = _mock_responder_proto(psk_bytes)
+
+    await asyncio.sleep(0)  # let the task run to read the hello packet
+
+    assert len(writes) == 1
+    handshake_pkt = writes.pop()
+
+    encrypted_payload = _extract_encrypted_payload_from_handshake(handshake_pkt)
+    decrypted = proto.read_message(encrypted_payload)
+    assert decrypted == b""
+
+    hello_pkt_with_header = _make_noise_hello_pkt(b"\x01servicetest\0")
+    mock_data_received(helper, hello_pkt_with_header)
+
+    handshake_with_header = _make_noise_handshake_pkt(proto)
+    mock_data_received(helper, handshake_with_header)
+
+    assert not writes
+
+    await helper.ready_future
+    helper.write_packets([(1, b"to device")], True)
+    encrypted_packet = writes.pop()
+    header = encrypted_packet[0:1]
+    assert header == b"\x01"
+    pkg_length_high = encrypted_packet[1]
+    pkg_length_low = encrypted_packet[2]
+    pkg_length = (pkg_length_high << 8) + pkg_length_low
+    assert len(encrypted_packet) == 3 + pkg_length
+
+    msg_type = 42
+    msg_type_high = (msg_type >> 8) & 0xFF
+    msg_type_low = msg_type & 0xFF
+    # Trim the pre-encrypted payload to be missing the payload
+    encrypted_payload = proto.encrypt(
+        bytes((msg_type_high, msg_type_low, pkg_length_high, pkg_length_low))
+    )
+
+    preamble = 1
+    encrypted_pkg_length = len(encrypted_payload)
+    encrypted_pkg_length -= 1
+    encrypted_pkg_length_high = (encrypted_pkg_length >> 8) & 0xFF
+    encrypted_pkg_length_low = encrypted_pkg_length & 0xFF
+    encrypted_header = bytes(
+        (preamble, encrypted_pkg_length_high, encrypted_pkg_length_low)
+    )
+    encrypted_packet = encrypted_header + encrypted_payload
+
+    mock_data_received(helper, encrypted_packet)
+
+    assert packets == []
+    assert connection.is_connected is False
+    assert "Encryption error" in caplog.text
+    helper.close()
+
+
+async def test_noise_frame_helper_bad_encryption(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test the noise frame helper closes connection on encryption error."""
+    noise_psk = "QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc="
+    psk_bytes = base64.b64decode(noise_psk)
+    writes = []
+
+    def _writelines(data: Iterable[bytes]):
+        writes.append(b"".join(data))
+
+    connection, packets = _make_mock_connection()
+
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk=noise_psk,
+        expected_name="servicetest",
+        client_info="my client",
+        log_name="test",
+        writer=_writelines,
+        expected_mac=None,
+    )
+
+    proto = _mock_responder_proto(psk_bytes)
+
+    await asyncio.sleep(0)  # let the task run to read the hello packet
+
+    assert len(writes) == 1
+    handshake_pkt = writes.pop()
+
+    encrypted_payload = _extract_encrypted_payload_from_handshake(handshake_pkt)
+    decrypted = proto.read_message(encrypted_payload)
+    assert decrypted == b""
+
+    hello_pkt_with_header = _make_noise_hello_pkt(b"\x01servicetest\0")
+    mock_data_received(helper, hello_pkt_with_header)
+
+    handshake_with_header = _make_noise_handshake_pkt(proto)
+    mock_data_received(helper, handshake_with_header)
+
+    assert not writes
+
+    await helper.ready_future
+    helper.write_packets([(1, b"to device")], True)
+    encrypted_packet = writes.pop()
+    header = encrypted_packet[0:1]
+    assert header == b"\x01"
+    pkg_length_high = encrypted_packet[1]
+    pkg_length_low = encrypted_packet[2]
+    pkg_length = (pkg_length_high << 8) + pkg_length_low
+    assert len(encrypted_packet) == 3 + pkg_length
+
+    encrypted_packet = _make_encrypted_packet_from_encrypted_payload(b"corrupt")
+    mock_data_received(helper, encrypted_packet)
+    await asyncio.sleep(0)
+
+    assert packets == []
+    assert connection.is_connected is False
+    assert "Encryption error" in caplog.text
+    helper.close()
+
+
+async def test_init_plaintext_with_wrong_preamble(
+    conn: APIConnection, aiohappyeyeballs_start_connection
+):
+    loop = asyncio.get_running_loop()
+    protocol = get_mock_protocol(conn)
+    with patch.object(loop, "create_connection") as create_connection:
+        create_connection.return_value = (MagicMock(), protocol)
+
+        conn._socket = MagicMock()
+        await conn._connect_init_frame_helper()
+        loop.call_soon(conn._frame_helper.ready_future.set_result, None)
+        conn.connection_state = ConnectionState.CONNECTED
+
+    task = asyncio.create_task(conn._connect_hello_login(login=True))
+    await asyncio.sleep(0)
+    # The preamble should be \x00 but we send \x09
+    mock_data_received(protocol, b"\x09\x00\x00")
+
+    with pytest.raises(ProtocolAPIError):
+        await task
+
+
+async def test_plaintext_frame_helper_rejects_overlong_varuint() -> None:
+    """Test a never-terminating varuint is rejected instead of growing the buffer forever."""
+    connection, packets = _make_mock_connection()
+    helper = APIPlaintextFrameHelper(
+        connection=connection, client_info="my client", log_name="test"
+    )
+    helper.connection_made(MagicMock())
+
+    # Six bytes with the high bit always set — would otherwise be accumulated
+    # into an ever-growing bigint while the varuint is rescanned each chunk.
+    mock_data_received(helper, b"\x80\x80\x80\x80\x80\x80")
+
+    assert not packets
+    assert isinstance(connection._fatal_exception, ProtocolAPIError)
+    assert "varuint exceeds" in str(connection._fatal_exception)
+
+
+async def test_plaintext_frame_helper_incomplete_preamble_waits() -> None:
+    """Test 3 continuation bytes for the preamble varuint pause parsing rather than close."""
+    connection, packets = _make_mock_connection()
+    helper = APIPlaintextFrameHelper(
+        connection=connection, client_info="my client", log_name="test"
+    )
+    helper.connection_made(MagicMock())
+
+    # 3 continuation bytes meets the loop guard (>= 3) but the preamble
+    # varuint is incomplete — bitpos is 21, still under the 28-bit cap.
+    # _read_varuint should return _VARUINT_INCOMPLETE; data_received must
+    # leave the connection open so the next chunk can finish the varuint.
+    mock_data_received(helper, b"\x80\x80\x80")
+
+    assert not packets
+    assert connection._fatal_exception is None
+
+
+async def test_plaintext_frame_helper_rejects_oversized_frame_length() -> None:
+    """Test a length varuint above the per-frame cap closes the connection."""
+    connection, packets = _make_mock_connection()
+    helper = APIPlaintextFrameHelper(
+        connection=connection, client_info="my client", log_name="test"
+    )
+    helper.connection_made(MagicMock())
+
+    # Valid preamble + a length one byte over the cap + any msg_type.
+    mock_data_received(
+        helper,
+        PREAMBLE + varuint_to_bytes(MAX_PLAINTEXT_FRAME_SIZE + 1) + varuint_to_bytes(1),
+    )
+
+    assert not packets
+    assert isinstance(connection._fatal_exception, ProtocolAPIError)
+    assert "exceeds" in str(connection._fatal_exception)
+
+
+async def test_plaintext_frame_helper_rejects_5_byte_high_bit_varuint() -> None:
+    """Test a 5-byte varuint that would decode to a value with bit 31 set is rejected.
+
+    Regression for the Cython unsigned->signed cast trap raised in PR #1651
+    review: with `result="unsigned int"` and `cdef int` return, a value
+    >= 2**31 would otherwise come back negative and silently hit the
+    incomplete-varuint path. The 4-byte cap rejects the 5th byte at the
+    bitpos limit before any cast can happen.
+    """
+    connection, packets = _make_mock_connection()
+    helper = APIPlaintextFrameHelper(
+        connection=connection, client_info="my client", log_name="test"
+    )
+    helper.connection_made(MagicMock())
+
+    # Bytes that would decode to 0xFFFFFFFF (high bit set) under a 5-byte
+    # varuint: \xff\xff\xff\xff\x0f. The 4-byte cap fires before we ever
+    # consume the 5th byte.
+    mock_data_received(helper, PREAMBLE + b"\xff\xff\xff\xff\x0f")
+
+    assert not packets
+    assert isinstance(connection._fatal_exception, ProtocolAPIError)
+    assert "varuint exceeds" in str(connection._fatal_exception)
+
+
+async def test_plaintext_frame_helper_rejects_overlong_length_varuint() -> None:
+    """Test a never-terminating length varuint after a valid preamble closes the connection."""
+    connection, packets = _make_mock_connection()
+    helper = APIPlaintextFrameHelper(
+        connection=connection, client_info="my client", log_name="test"
+    )
+    helper.connection_made(MagicMock())
+
+    # Valid 0x00 preamble, then 6 continuation bytes for the length varuint.
+    mock_data_received(helper, PREAMBLE + b"\x80\x80\x80\x80\x80\x80")
+
+    assert not packets
+    assert isinstance(connection._fatal_exception, ProtocolAPIError)
+    assert "varuint exceeds" in str(connection._fatal_exception)
+
+
+async def test_plaintext_frame_helper_rejects_overlong_msg_type_varuint() -> None:
+    """Test a never-terminating msg_type varuint after a valid length closes the connection."""
+    connection, packets = _make_mock_connection()
+    helper = APIPlaintextFrameHelper(
+        connection=connection, client_info="my client", log_name="test"
+    )
+    helper.connection_made(MagicMock())
+
+    # Valid preamble + valid 1-byte length + 6 continuation bytes for msg_type.
+    mock_data_received(
+        helper, PREAMBLE + varuint_to_bytes(0) + b"\x80\x80\x80\x80\x80\x80"
+    )
+
+    assert not packets
+    assert isinstance(connection._fatal_exception, ProtocolAPIError)
+    assert "varuint exceeds" in str(connection._fatal_exception)
+
+
+async def test_plaintext_frame_helper_accepts_max_frame_length() -> None:
+    """Test a frame at the size cap is still accepted (off-by-one guard)."""
+    connection, packets = _make_mock_connection()
+    helper = APIPlaintextFrameHelper(
+        connection=connection, client_info="my client", log_name="test"
+    )
+    helper.connection_made(MagicMock())
+
+    payload = b"\x42" * MAX_PLAINTEXT_FRAME_SIZE
+    mock_data_received(
+        helper,
+        PREAMBLE
+        + varuint_to_bytes(MAX_PLAINTEXT_FRAME_SIZE)
+        + varuint_to_bytes(42)
+        + payload,
+    )
+
+    assert connection._fatal_exception is None
+    assert packets == [(42, payload)]
+
+
+async def test_init_noise_with_wrong_byte_marker(noise_conn: APIConnection) -> None:
+    loop = asyncio.get_running_loop()
+    transport = MagicMock()
+    protocol: APINoiseFrameHelper | None = None
+
+    async def _create_connection(create, sock, *args, **kwargs):
+        nonlocal protocol
+        protocol = create()
+        protocol.connection_made(transport)
+        return transport, protocol
+
+    with patch.object(loop, "create_connection", side_effect=_create_connection):
+        task = asyncio.create_task(noise_conn._connect_init_frame_helper())
+        await asyncio.sleep(0)
+
+        assert protocol is not None
+        assert isinstance(noise_conn._frame_helper, APINoiseFrameHelper)
+
+        mock_data_received(protocol, b"\x02\x00\x00")
+
+        with pytest.raises(ProtocolAPIError, match="Marker byte invalid"):
+            await task
+
+
+async def test_init_noise_with_plaintext_byte_marker(noise_conn: APIConnection) -> None:
+    loop = asyncio.get_running_loop()
+    transport = MagicMock()
+    protocol: APINoiseFrameHelper | None = None
+
+    async def _create_connection(create, sock, *args, **kwargs):
+        nonlocal protocol
+        protocol = create()
+        protocol.connection_made(transport)
+        return transport, protocol
+
+    with patch.object(loop, "create_connection", side_effect=_create_connection):
+        task = asyncio.create_task(noise_conn._connect_init_frame_helper())
+        await asyncio.sleep(0)
+
+        assert protocol is not None
+        assert isinstance(noise_conn._frame_helper, APINoiseFrameHelper)
+
+        mock_data_received(protocol, b"\x00\x00\x00")
+
+        with pytest.raises(
+            EncryptionPlaintextAPIError, match="The device is using plaintext protocol"
+        ):
+            await task
+
+
+async def test_noise_frame_helper_empty_hello():
+    """Test empty hello with noise."""
+    connection, _ = _make_mock_connection()
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk="QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc=",
+        expected_name="servicetest",
+        client_info="my client",
+        log_name="test",
+        expected_mac=None,
+    )
+
+    hello_pkt_with_header = _make_noise_hello_pkt(b"")
+
+    mock_data_received(helper, hello_pkt_with_header)
+
+    with pytest.raises(HandshakeAPIError, match="ServerHello is empty"):
+        await helper.ready_future
+
+
+async def test_noise_frame_helper_empty_handshake_frame():
+    """Empty handshake frame surfaces as HandshakeAPIError, not IndexError."""
+    connection, _ = _make_mock_connection()
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk="QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc=",
+        expected_name="servicetest",
+        client_info="my client",
+        log_name="test",
+        expected_mac=None,
+    )
+
+    hello_pkt_with_header = _make_noise_hello_pkt(b"\x01servicetest\0")
+    mock_data_received(helper, hello_pkt_with_header)
+
+    # 3-byte header advertising a zero-length frame, no payload bytes.
+    empty_handshake_with_header = bytes((0x01, 0x00, 0x00))
+    mock_data_received(helper, empty_handshake_with_header)
+
+    with pytest.raises(HandshakeAPIError, match="Handshake frame is empty"):
+        await helper.ready_future
+
+
+async def test_noise_frame_helper_handshake_invalid_tag() -> None:
+    """Handshake body with valid preamble but bogus AEAD payload surfaces as InvalidEncryptionKeyAPIError."""
+    connection, _ = _make_mock_connection()
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk="QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc=",
+        expected_name="servicetest",
+        client_info="my client",
+        log_name="test",
+        expected_mac=None,
+    )
+
+    await asyncio.sleep(0)  # let the task run to read the hello packet
+    hello_pkt_with_header = _make_noise_hello_pkt(b"\x01servicetest\0")
+    mock_data_received(helper, hello_pkt_with_header)
+
+    # preamble=0x00 (handshake), then 48 bytes of garbage that look like a
+    # valid-length NN responder reply (32-byte ephemeral pubkey + 16-byte MAC)
+    # but fail authentication. Without explicit InvalidTag handling the
+    # cryptography library exception would propagate raw to the caller.
+    bogus_handshake = b"\x00" + (b"\xff" * 48)
+    pkt_len = len(bogus_handshake)
+    handshake_pkt_with_header = (
+        bytes((0x01, (pkt_len >> 8) & 0xFF, pkt_len & 0xFF)) + bogus_handshake
+    )
+    mock_data_received(helper, handshake_pkt_with_header)
+
+    with pytest.raises(InvalidEncryptionKeyAPIError) as exc_info:
+        await helper.ready_future
+    assert exc_info.value.received_name == "servicetest"
+
+
+async def test_noise_frame_helper_handshake_other_noise_error():
+    """A non-InvalidTag noise lib exception is wrapped as HandshakeAPIError."""
+    connection, _ = _make_mock_connection()
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk="QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc=",
+        expected_name="servicetest",
+        client_info="my client",
+        log_name="test",
+        expected_mac=None,
+    )
+
+    await asyncio.sleep(0)
+    hello_pkt_with_header = _make_noise_hello_pkt(b"\x01servicetest\0")
+    mock_data_received(helper, hello_pkt_with_header)
+
+    # preamble=0x00 then a too-short body. The noise library raises
+    # NoiseInvalidMessage (not InvalidTag) when the responder reply is
+    # shorter than the protocol's e + ee size.
+    bogus_handshake = b"\x00\x01\x02"
+    pkt_len = len(bogus_handshake)
+    handshake_pkt_with_header = (
+        bytes((0x01, (pkt_len >> 8) & 0xFF, pkt_len & 0xFF)) + bogus_handshake
+    )
+    mock_data_received(helper, handshake_pkt_with_header)
+
+    with pytest.raises(HandshakeAPIError, match="Handshake failed"):
+        await helper.ready_future
+
+
+async def test_noise_frame_helper_wrong_protocol():
+    """Test noise with the wrong protocol."""
+    connection, _ = _make_mock_connection()
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk="QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc=",
+        expected_name="servicetest",
+        client_info="my client",
+        log_name="test",
+        expected_mac=None,
+    )
+
+    # wrong protocol 5 instead of 1
+    hello_pkt_with_header = _make_noise_hello_pkt(b"\x05servicetest\0")
+
+    mock_data_received(helper, hello_pkt_with_header)
+
+    with pytest.raises(
+        HandshakeAPIError, match="Unknown protocol selected by client 5"
+    ):
+        await helper.ready_future
+
+
+@pytest.mark.parametrize(
+    ("raw", "limit", "expected"),
+    [
+        # Plain ASCII passes through untouched.
+        ("hello", 32, "hello"),
+        # Length cap applied after stripping non-printables.
+        ("abcdefghij", 4, "abcd"),
+        # Empty string round-trips as empty.
+        ("", 32, ""),
+        # CRLF, NUL, and ANSI escape are non-printable per str.isprintable.
+        ("evil\r\nFAKE\x1b[31m", 64, "evilFAKE[31m"),
+        ("\x00\x00\x00\x00", 64, ""),
+        ("a\nb\rc\td", 64, "abcd"),
+        # Tab is non-printable; space is printable.
+        ("a\tb c", 64, "ab c"),
+        # Non-ASCII printable characters survive (str.isprintable is Unicode-aware).
+        ("café", 32, "café"),
+        # Cap counts code points, not bytes — multi-byte chars are not double-counted.
+        ("é" * 100, 8, "é" * 8),
+        # 3-byte UTF-8 (CJK) passes through untouched.
+        ("日本語デバイス", 32, "日本語デバイス"),
+        # Cap counts code points on 3-byte UTF-8: 7 chars x 3 bytes = 21 bytes; limit 3 -> 3 chars.
+        ("日本語デバイス", 3, "日本語"),
+        # Mixed-width: ASCII + CJK survive, control char stripped, cap counts code points.
+        ("hi\x00日本", 4, "hi日本"),
+        # Strip first, then cap: a 100-char input of only non-printables yields "".
+        ("\r" * 100, 8, ""),
+        # Mixed: control chars between printables get removed before the cap fires.
+        ("\rhello\nworld\r", 5, "hello"),
+        # limit=0 produces an empty string regardless of input.
+        ("anything", 0, ""),
+    ],
+)
+def test_safe_label_str(raw: str, limit: int, expected: str) -> None:
+    """safe_label_str strips non-printables then length-caps to `limit` code points."""
+    assert safe_label_str(raw, limit) == expected
+
+
+def test_safe_label_str_is_idempotent() -> None:
+    """Re-sanitizing an already-sanitized string returns the same value."""
+    once = safe_label_str("evil\r\nFAKE\x1b[31m", 64)
+    twice = safe_label_str(once, 64)
+    assert once == twice == "evilFAKE[31m"
+
+
+async def test_noise_frame_helper_sanitizes_server_name_in_error() -> None:
+    """Test control chars in the unauthenticated server_name are stripped from logs."""
+    connection, _ = _make_mock_connection()
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk="QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc=",
+        expected_name="servicetest",
+        client_info="my client",
+        log_name="test",
+        expected_mac=None,
+    )
+
+    # Inject CRLF + ANSI escape into the unauthenticated name field. These
+    # would otherwise land in operator-visible logs unfiltered.
+    nasty_name = b"evil\r\nFAKE LOG LINE\x1b[31m"
+    hello_pkt_with_header = _make_noise_hello_pkt(b"\x01" + nasty_name + b"\0")
+
+    mock_data_received(helper, hello_pkt_with_header)
+
+    with pytest.raises(BadNameAPIError) as exc_info:
+        await helper.ready_future
+    msg = str(exc_info.value)
+    for ch in ("\r", "\n", "\x1b"):
+        assert ch not in msg
+    # The sanitized name still survives so operators can see what happened,
+    # and the structured received_name field on the exception is sanitized too.
+    assert "evilFAKE LOG LINE[31m" in msg
+    for ch in ("\r", "\n", "\x1b"):
+        assert ch not in exc_info.value.received_name
+
+
+async def test_noise_frame_helper_sanitizes_server_mac_in_error() -> None:
+    """Test control chars in the unauthenticated mac field are stripped from logs."""
+    connection, _ = _make_mock_connection()
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk="QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc=",
+        expected_name="servicetest",
+        client_info="my client",
+        log_name="test",
+        expected_mac="aabbccddeeff",
+    )
+
+    nasty_mac = b"112233\r\nFAKE\x1bbad"
+    hello_pkt_with_header = _make_noise_hello_pkt(
+        b"\x01servicetest\0" + nasty_mac + b"\0"
+    )
+
+    mock_data_received(helper, hello_pkt_with_header)
+
+    with pytest.raises(BadMACAddressAPIError) as exc_info:
+        await helper.ready_future
+    msg = str(exc_info.value)
+    for ch in ("\r", "\n", "\x1b"):
+        assert ch not in msg
+    for ch in ("\r", "\n", "\x1b"):
+        assert ch not in exc_info.value.received_mac
+
+
+async def test_noise_frame_helper_sanitizes_handshake_explanation() -> None:
+    """Test control chars in the handshake-failure explanation are stripped from logs."""
+    connection, _ = _make_mock_connection()
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk="QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc=",
+        expected_name="servicetest",
+        client_info="my client",
+        log_name="test",
+        expected_mac=None,
+    )
+
+    # Get past the hello phase so the next preamble triggers
+    # _error_on_incorrect_preamble.
+    hello_pkt_with_header = _make_noise_hello_pkt(b"\x01servicetest\0")
+    mock_data_received(helper, hello_pkt_with_header)
+
+    nasty_explanation = b"boom\r\nFAKE LOG\x1b[31m"
+    error_pkt = b"\x01" + nasty_explanation
+    error_pkg_length = len(error_pkt)
+    error_header = bytes((1, (error_pkg_length >> 8) & 0xFF, error_pkg_length & 0xFF))
+    mock_data_received(helper, error_header + error_pkt)
+
+    with pytest.raises(HandshakeAPIError) as exc_info:
+        await helper.ready_future
+    msg = str(exc_info.value)
+    for ch in ("\r", "\n", "\x1b"):
+        assert ch not in msg
+
+
+async def test_noise_frame_helper_name_check_uses_raw_value() -> None:
+    """Test sanitization can't be used to bypass the expected_name check."""
+    connection, _ = _make_mock_connection()
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk="QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc=",
+        expected_name="servicetest",
+        client_info="my client",
+        log_name="test",
+        expected_mac=None,
+    )
+
+    # "servicetest\r\n" sanitizes to "servicetest" — but the expected_name
+    # comparison must run against the raw decoded value, so this peer should
+    # be rejected, not accepted.
+    hello_pkt_with_header = _make_noise_hello_pkt(b"\x01servicetest\r\n\0")
+
+    mock_data_received(helper, hello_pkt_with_header)
+
+    with pytest.raises(BadNameAPIError):
+        await helper.ready_future
+
+
+async def test_noise_frame_helper_mac_check_uses_raw_value() -> None:
+    """Test sanitization can't be used to bypass the expected_mac check."""
+    connection, _ = _make_mock_connection()
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk="QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc=",
+        expected_name="servicetest",
+        client_info="my client",
+        log_name="test",
+        expected_mac="aabbccddeeff",
+    )
+
+    # "aabbccddeeff\n" sanitizes to "aabbccddeeff" — but the expected_mac
+    # comparison must use the raw value and reject this peer.
+    hello_pkt_with_header = _make_noise_hello_pkt(b"\x01servicetest\0aabbccddeeff\n\0")
+
+    mock_data_received(helper, hello_pkt_with_header)
+
+    with pytest.raises(BadMACAddressAPIError):
+        await helper.ready_future
+
+
+async def test_noise_frame_helper_handshake_explanation_uses_raw_value() -> None:
+    """Test sanitization can't smuggle Handshake-MAC-failure misclassification."""
+    connection, _ = _make_mock_connection()
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk="QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc=",
+        expected_name="servicetest",
+        client_info="my client",
+        log_name="test",
+        expected_mac=None,
+    )
+
+    hello_pkt_with_header = _make_noise_hello_pkt(b"\x01servicetest\0")
+    mock_data_received(helper, hello_pkt_with_header)
+
+    # "Handshake MAC failure\0extra" sanitizes to "Handshake MAC failure" but
+    # the raw value differs, so it must be classified as a generic handshake
+    # error rather than InvalidEncryptionKeyAPIError.
+    explanation = b"Handshake MAC failure\0extra"
+    error_pkt = b"\x01" + explanation
+    error_pkg_length = len(error_pkt)
+    error_header = bytes((1, (error_pkg_length >> 8) & 0xFF, error_pkg_length & 0xFF))
+    mock_data_received(helper, error_header + error_pkt)
+
+    with pytest.raises(HandshakeAPIError) as exc_info:
+        await helper.ready_future
+    # Not the dedicated InvalidEncryptionKeyAPIError, just a HandshakeAPIError.
+    assert not isinstance(exc_info.value, InvalidEncryptionKeyAPIError)
+
+
+async def test_noise_frame_helper_caps_server_name_length() -> None:
+    """Test an oversized name field is truncated rather than logged in full."""
+    connection, _ = _make_mock_connection()
+    helper = MockAPINoiseFrameHelper(
+        connection=connection,
+        noise_psk="QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc=",
+        expected_name="servicetest",
+        client_info="my client",
+        log_name="test",
+        expected_mac=None,
+    )
+
+    # 4 KiB of 'a' as the "name" — would otherwise end up in logs verbatim.
+    huge = b"a" * 4096
+    hello_pkt_with_header = _make_noise_hello_pkt(b"\x01" + huge + b"\0")
+
+    mock_data_received(helper, hello_pkt_with_header)
+
+    with pytest.raises(BadNameAPIError) as exc_info:
+        await helper.ready_future
+    assert len(exc_info.value.received_name) == MAX_NAME_LEN
+
+
+async def test_init_noise_attempted_when_esp_uses_plaintext(
+    noise_conn: APIConnection,
+) -> None:
+    loop = asyncio.get_running_loop()
+    transport = MagicMock()
+    protocol: APINoiseFrameHelper | None = None
+
+    async def _create_connection(create, sock, *args, **kwargs):
+        nonlocal protocol
+        protocol = create()
+        protocol.connection_made(transport)
+        return transport, protocol
+
+    with patch.object(loop, "create_connection", side_effect=_create_connection):
+        task = asyncio.create_task(noise_conn._connect_init_frame_helper())
+        await asyncio.sleep(0)
+
+        assert isinstance(noise_conn._frame_helper, APINoiseFrameHelper)
+        protocol = noise_conn._frame_helper
+
+        protocol.connection_lost(ConnectionResetError())
+
+        with pytest.raises(
+            EncryptionHelloAPIError, match="The connection dropped immediately"
+        ):
+            await task
+
+
+async def test_eof_received_closes_connection(
+    plaintext_connect_task_with_login: tuple[
+        APIConnection, asyncio.Transport, APIPlaintextFrameHelper, asyncio.Task
+    ],
+) -> None:
+    conn, _transport, protocol, connect_task = plaintext_connect_task_with_login
+    assert protocol.eof_received() is False
+    assert conn.is_connected is False
+    with pytest.raises(SocketClosedAPIError, match="EOF received"):
+        await connect_task
+
+
+@pytest.mark.parametrize(
+    ("exception_map"),
+    [
+        (OSError("original message"), ReadFailedAPIError),
+        (APIConnectionError("original message"), APIConnectionError),
+        (SocketClosedAPIError("original message"), SocketClosedAPIError),
+    ],
+)
+async def test_connection_lost_closes_connection_and_logs(
+    caplog: pytest.LogCaptureFixture,
+    plaintext_connect_task_with_login: tuple[
+        APIConnection, asyncio.Transport, APIPlaintextFrameHelper, asyncio.Task
+    ],
+    exception_map: tuple[Exception, Exception],
+) -> None:
+    exception, raised_exception = exception_map
+    conn, _transport, protocol, connect_task = plaintext_connect_task_with_login
+    protocol.connection_lost(exception)
+    assert conn.is_connected is False
+    assert "original message" in caplog.text
+    with pytest.raises(raised_exception, match="original message"):
+        await connect_task
+
+
+@pytest.mark.parametrize(
+    ("bad_psk", "error"),
+    [
+        ("dGhpc2lzbm90MzJieXRlcw==", "expected base64-encoded 32-byte value"),
+        ("QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc", "Malformed PSK"),
+    ],
+)
+async def test_noise_bad_psks(bad_psk: str, error: str) -> None:
+    """Test we raise on bad psks."""
+    connection, _ = _make_mock_connection()
+    with pytest.raises(InvalidEncryptionKeyAPIError, match=error) as exc_info:
+        MockAPINoiseFrameHelper(
+            connection=connection,
+            noise_psk=bad_psk,
+            expected_name="wrongname",
+            client_info="my client",
+            log_name="test",
+            expected_mac=None,
+        )
+    assert bad_psk not in str(exc_info.value)
+    assert f"length={len(bad_psk)}" in str(exc_info.value)

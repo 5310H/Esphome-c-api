@@ -1,0 +1,5393 @@
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from functools import partial
+import itertools
+import json
+import logging
+import socket
+from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, MagicMock, call, create_autospec, patch
+
+import pytest
+
+from aioesphomeapi._frame_helper.base import MAX_NAME_LEN
+from aioesphomeapi.api_pb2 import (
+    AlarmControlPanelCommandRequest,
+    BinarySensorStateResponse,
+    BluetoothConnectionsFreeResponse,
+    BluetoothDeviceClearCacheResponse,
+    BluetoothDeviceConnectionResponse,
+    BluetoothDevicePairingResponse,
+    BluetoothDeviceRequest,
+    BluetoothDeviceUnpairingResponse,
+    BluetoothGATTCharacteristic,
+    BluetoothGATTDescriptor,
+    BluetoothGATTErrorResponse,
+    BluetoothGATTGetServicesDoneResponse,
+    BluetoothGATTGetServicesResponse,
+    BluetoothGATTNotifyDataResponse,
+    BluetoothGATTNotifyResponse,
+    BluetoothGATTReadResponse,
+    BluetoothGATTService,
+    BluetoothGATTWriteResponse,
+    BluetoothLEAdvertisementResponse,
+    BluetoothLERawAdvertisement,
+    BluetoothLERawAdvertisementsResponse,
+    BluetoothScannerMode,
+    BluetoothScannerSetModeRequest,
+    BluetoothScannerState,
+    BluetoothScannerStateResponse,
+    BluetoothServiceData,
+    BluetoothSetConnectionParamsResponse,
+    ButtonCommandRequest,
+    CameraImageRequest,
+    CameraImageResponse,
+    ClimateCommandRequest,
+    CoverCommandRequest,
+    DateCommandRequest,
+    DateTimeCommandRequest,
+    DeviceInfoResponse,
+    DisconnectResponse,
+    ExecuteServiceArgument,
+    ExecuteServiceRequest,
+    ExecuteServiceResponse as ExecuteServiceResponsePb,
+    FanCommandRequest,
+    HomeassistantActionRequest,
+    HomeassistantActionResponse,
+    HomeAssistantStateResponse,
+    InfraredRFReceiveEvent as InfraredRFReceiveEventPb,
+    InfraredRFTransmitRawTimingsRequest as InfraredRFTransmitRawTimingsRequestPb,
+    LightCommandRequest,
+    ListEntitiesBinarySensorResponse,
+    ListEntitiesDoneResponse,
+    ListEntitiesSensorResponse,
+    ListEntitiesServicesResponse,
+    LockCommandRequest,
+    MediaPlayerCommandRequest,
+    NoiseEncryptionSetKeyRequest,
+    NoiseEncryptionSetKeyResponse,
+    NumberCommandRequest,
+    SelectCommandRequest,
+    SerialProxyConfigureRequest as SerialProxyConfigureRequestPb,
+    SerialProxyDataReceived as SerialProxyDataReceivedPb,
+    SerialProxyGetModemPinsRequest as SerialProxyGetModemPinsRequestPb,
+    SerialProxyGetModemPinsResponse as SerialProxyGetModemPinsResponsePb,
+    SerialProxyRequest as SerialProxyRequestPb,
+    SerialProxyRequestResponse as SerialProxyRequestResponsePb,
+    SerialProxySetModemPinsRequest as SerialProxySetModemPinsRequestPb,
+    SerialProxyWriteRequest as SerialProxyWriteRequestPb,
+    SirenCommandRequest,
+    SubscribeHomeassistantServicesRequest,
+    SubscribeHomeAssistantStateResponse,
+    SubscribeHomeAssistantStatesRequest,
+    SubscribeLogsResponse,
+    SubscribeStatesRequest,
+    SubscribeVoiceAssistantRequest,
+    SwitchCommandRequest,
+    TextCommandRequest,
+    TimeCommandRequest,
+    UpdateCommandRequest,
+    ValveCommandRequest,
+    VoiceAssistantAnnounceFinished,
+    VoiceAssistantAnnounceRequest,
+    VoiceAssistantAudio,
+    VoiceAssistantAudioSettings,
+    VoiceAssistantConfigurationRequest,
+    VoiceAssistantConfigurationResponse,
+    VoiceAssistantEventData,
+    VoiceAssistantEventResponse,
+    VoiceAssistantExternalWakeWord,
+    VoiceAssistantRequest,
+    VoiceAssistantResponse,
+    VoiceAssistantSetConfiguration,
+    VoiceAssistantTimerEventResponse,
+    VoiceAssistantWakeWord,
+    WaterHeaterCommandRequest,
+    ZWaveProxyRequest as ZWaveProxyRequestPb,
+)
+from aioesphomeapi.client import (
+    APIClient,
+    BluetoothConnectionDroppedError,
+    _validate_connection_params,
+)
+from aioesphomeapi.client_base import MAX_CAMERA_FRAME_BYTES, MAX_INFLIGHT_CAMERA_KEYS
+from aioesphomeapi.core import (
+    APIConnectionError,
+    BluetoothConnectionParamsAPIError,
+    BluetoothGATTAPIError,
+    TimeoutAPIError,
+    UnhandledAPIConnectionError,
+)
+from aioesphomeapi.model import (
+    AlarmControlPanelCommand,
+    APIVersion,
+    BinarySensorInfo,
+    BinarySensorState,
+    BluetoothDeviceRequestType,
+    BluetoothGATTService as BluetoothGATTServiceModel,
+    BluetoothLEAdvertisement,
+    BluetoothProxyFeature,
+    BluetoothScannerMode as BluetoothScannerModeModel,
+    BluetoothScannerStateResponse as BluetoothScannerStateResponseModel,
+    CameraState,
+    ClimateFanMode,
+    ClimateMode,
+    ClimatePreset,
+    ClimateSwingMode,
+    DeviceInfo,
+    ESPHomeBluetoothGATTServices,
+    FanDirection,
+    FanSpeed,
+    HomeassistantActionResponse as HomeassistantActionResponseModel,
+    HomeassistantServiceCall,
+    InfraredRFReceiveEvent,
+    LegacyCoverCommand,
+    LightColorCapability,
+    LockCommand,
+    MediaPlayerCommand,
+    RadioFrequencyModulation,
+    SensorInfo,
+    SerialProxyDataReceived,
+    SerialProxyModemPins,
+    SerialProxyParity,
+    SerialProxyRequestResponse,
+    SerialProxyRequestType,
+    SerialProxyStatus,
+    UpdateCommand,
+    UserService,
+    UserServiceArg,
+    UserServiceArgType,
+    VoiceAssistantAnnounceFinished as VoiceAssistantAnnounceFinishedModel,
+    VoiceAssistantAudioSettings as VoiceAssistantAudioSettingsModel,
+    VoiceAssistantConfigurationResponse as VoiceAssistantConfigurationResponseModel,
+    VoiceAssistantEventType as VoiceAssistantEventModelType,
+    VoiceAssistantExternalWakeWord as VoiceAssistantExternalWakeWordModel,
+    VoiceAssistantTimerEventType as VoiceAssistantTimerEventModelType,
+    WaterHeaterCommandField,
+    WaterHeaterMode,
+    WaterHeaterStateFlag,
+    ZWaveProxyRequest,
+)
+from aioesphomeapi.reconnect_logic import ReconnectLogic, ReconnectLogicState
+
+from .common import (
+    Estr,
+    generate_plaintext_packet,
+    generate_split_plaintext_packet,
+    get_mock_zeroconf,
+    mock_data_received,
+)
+from .conftest import PatchableAPIClient, PatchableAPIConnection
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Coroutine
+
+    from google.protobuf import message
+
+    from aioesphomeapi._frame_helper.plain_text import APIPlaintextFrameHelper
+    from aioesphomeapi.connection import APIConnection
+
+
+def patch_response_complex(client: APIClient, messages):
+    async def patched(req, app, stop, msg_types, timeout):
+        resp = []
+        for msg in messages:
+            if app(msg):
+                resp.append(msg)
+            if stop(msg):
+                break
+        else:
+            error_msg = "Response never stopped"
+            raise ValueError(error_msg)
+        return resp
+
+    client._connection.send_messages_await_response_complex = patched
+
+
+def patch_response_simple(client: APIClient, response):
+    """Patch send_message_await_response to return a single response."""
+
+    async def patched(req, response_type):
+        return response
+
+    client._connection.send_message_await_response = patched
+
+
+def patch_response_callback(client: APIClient):
+    on_message = None
+
+    def cancelled_on_message(_):
+        """Stand in for a real callback in cancellation tests."""
+
+    def cancel_callable():
+        nonlocal on_message
+        on_message = cancelled_on_message
+
+    def patched(req, callback, msg_types):
+        nonlocal on_message
+        on_message = callback
+        return cancel_callable
+
+    client._connection.send_message_callback_response = patched
+
+    async def ret(send):
+        on_message(send)
+
+    return ret
+
+
+def patch_send(client: APIClient):
+    send = client._connection.send_message = MagicMock()
+    return send
+
+
+def patch_api_version(client: APIClient, version: APIVersion):
+    client._connection.api_version = version
+
+
+async def test_expected_name(auth_client: APIClient) -> None:
+    """Ensure expected name can be set externally."""
+    assert auth_client.expected_name is None
+    auth_client.expected_name = "awesome"
+    assert auth_client.expected_name == "awesome"
+
+
+async def test_timezone_parameter() -> None:
+    """Test that timezone parameter is passed to ConnectionParams."""
+    cli = PatchableAPIClient("host", 1234, None, timezone="America/Chicago")
+    assert cli._params.timezone == "America/Chicago"
+
+    # Test with None timezone (should use auto-detection)
+    cli2 = PatchableAPIClient("host", 1234, None)
+    assert cli2._params.timezone is None
+
+
+async def test_password_defaults_to_none() -> None:
+    """Password can be omitted when using encryption or unauthenticated devices."""
+    cli = PatchableAPIClient("host", 1234)
+    assert cli._params.password is None
+
+    cli_kw = PatchableAPIClient("host", 1234, noise_psk="psk")
+    assert cli_kw._params.password is None
+    assert cli_kw._params.noise_psk == "psk"
+
+    cli_pos = PatchableAPIClient("host", 1234, "secret")
+    assert cli_pos._params.password == "secret"  # noqa: S105
+
+
+async def test_connect_backwards_compat() -> None:
+    """Verify connect is a thin wrapper around start_resolve_host, start_connection and finish_connection."""
+    cli = PatchableAPIClient("host", 1234, None)
+    assert cli.connected_address is None
+
+    with (
+        patch.object(cli, "start_resolve_host") as mock_start_resolve_host,
+        patch.object(cli, "start_connection") as mock_start_connection,
+        patch.object(cli, "finish_connection") as mock_finish_connection,
+    ):
+        await cli.connect()
+
+    assert mock_start_resolve_host.mock_calls == [call(None, log_errors=True)]
+    assert mock_start_connection.mock_calls == [call()]
+    assert mock_finish_connection.mock_calls == [call(False)]
+
+
+async def test_finish_connection_wraps_exceptions_as_unhandled_api_error(
+    aiohappyeyeballs_start_connection,
+) -> None:
+    """Verify finish_connect re-wraps exceptions as UnhandledAPIError."""
+    cli = APIClient("127.0.0.1", 1234, None)
+    with patch("aioesphomeapi.client.APIConnection", PatchableAPIConnection):
+        await cli.start_resolve_host()
+        await cli.start_connection()
+
+    with (
+        patch.object(
+            cli._connection,
+            "send_messages_await_response_complex",
+            side_effect=Exception("foo"),
+        ),
+        pytest.raises(UnhandledAPIConnectionError, match="foo"),
+    ):
+        await cli.finish_connection(False)
+
+
+async def test_connection_released_if_connecting_is_cancelled() -> None:
+    """Verify connection is unset if connecting is cancelled."""
+    cli = APIClient("127.0.0.1", 1234, None)
+    asyncio.get_running_loop()
+
+    async def _start_connection_with_delay(*args, **kwargs):
+        await asyncio.sleep(1)
+        mock_socket = create_autospec(socket.socket, spec_set=True, instance=True)
+        mock_socket.getpeername.return_value = ("4.3.3.3", 323)
+        return mock_socket
+
+    with patch(
+        "aioesphomeapi.connection.aiohappyeyeballs.start_connection",
+        _start_connection_with_delay,
+    ):
+        await cli.start_resolve_host()
+        start_task = asyncio.create_task(cli.start_connection())
+        await asyncio.sleep(0)
+        assert cli._connection is not None
+
+    start_task.cancel()
+    with contextlib.suppress(BaseException):
+        await start_task
+    assert cli._connection is None
+
+    async def _start_connection_without_delay(*args, **kwargs):
+        mock_socket = create_autospec(socket.socket, spec_set=True, instance=True)
+        mock_socket.getpeername.return_value = ("4.3.3.3", 323)
+        return mock_socket
+
+    with (
+        patch("aioesphomeapi.client.APIConnection", PatchableAPIConnection),
+        patch(
+            "aioesphomeapi.connection.aiohappyeyeballs.start_connection",
+            _start_connection_without_delay,
+        ),
+    ):
+        await cli.start_resolve_host()
+        await cli.start_connection()
+        await asyncio.sleep(0)
+
+    assert cli._connection is not None
+    task = asyncio.create_task(cli.finish_connection(False))
+    await asyncio.sleep(0)
+    task.cancel()
+    with contextlib.suppress(BaseException):
+        await task
+    assert cli._connection is None
+
+
+async def test_request_while_handshaking() -> None:
+    """Test trying a request while handshaking raises."""
+    cli = PatchableAPIClient("127.0.0.1", 1234, None)
+    with (
+        patch(
+            "aioesphomeapi.connection.aiohappyeyeballs.start_connection",
+            side_effect=partial(asyncio.sleep, 1),
+        ),
+        patch.object(cli, "finish_connection"),
+    ):
+        connect_task = asyncio.create_task(cli.connect())
+
+    await asyncio.sleep(0)
+    with pytest.raises(
+        APIConnectionError, match="Authenticated connection not ready yet"
+    ):
+        await cli.device_info()
+
+    connect_task.cancel()
+    await asyncio.sleep(0)
+
+
+async def test_connect_while_already_connected(auth_client: APIClient) -> None:
+    """Test connecting while already connected raises."""
+    with pytest.raises(APIConnectionError):
+        await auth_client.start_resolve_host()
+
+
+@pytest.mark.parametrize(
+    ("input_value", "output"),
+    [
+        (
+            # When not cached, delegates to device_info_and_list_entities
+            # which expects DeviceInfoResponse + entity responses + ListEntitiesDoneResponse
+            [
+                DeviceInfoResponse(name="test-device", mac_address="AA:BB:CC:DD:EE:FF"),
+                ListEntitiesBinarySensorResponse(),
+                ListEntitiesDoneResponse(),
+            ],
+            # Empty-name entity gets object_id from device name
+            ([BinarySensorInfo(object_id="test-device")], []),
+        ),
+        (
+            [
+                DeviceInfoResponse(name="test-device", mac_address="AA:BB:CC:DD:EE:FF"),
+                ListEntitiesServicesResponse(),
+                ListEntitiesDoneResponse(),
+            ],
+            ([], [UserService()]),
+        ),
+    ],
+)
+async def test_list_entities(
+    auth_client: APIClient, input_value: dict[str, Any], output: dict[str, Any]
+) -> None:
+    # list_entities_services delegates to device_info_and_list_entities when not cached
+    patch_api_version(auth_client, APIVersion(1, 14))
+    patch_response_complex(auth_client, input_value)
+    resp = await auth_client.list_entities_services()
+    assert resp == output
+
+
+async def test_list_entities_auto_fetches_device_info(auth_client: APIClient) -> None:
+    """Test list_entities_services delegates to device_info_and_list_entities when not cached."""
+    # Verify _cached_device_info is initially None
+    assert auth_client._cached_device_info is None
+    patch_api_version(auth_client, APIVersion(1, 14))
+
+    # Patch combined response (device_info_and_list_entities sends both in one packet)
+    patch_response_complex(
+        auth_client,
+        [
+            DeviceInfoResponse(name="auto-device", mac_address="AA:BB:CC:DD:EE:FF"),
+            ListEntitiesBinarySensorResponse(name="My Sensor"),
+            ListEntitiesSensorResponse(name=""),  # Empty name, should use device name
+            ListEntitiesDoneResponse(),
+        ],
+    )
+
+    # Call list_entities_services WITHOUT calling device_info first
+    entities, _services = await auth_client.list_entities_services()
+
+    # Verify device_info was fetched and cached
+    assert auth_client._cached_device_info is not None
+    assert auth_client._cached_device_info.name == "auto-device"
+
+    # Verify object_id was filled in correctly
+    assert len(entities) == 2
+    # Named entity gets object_id from its name
+    assert entities[0].object_id == "my_sensor"
+    # Empty-name entity gets object_id from device name
+    assert entities[1].object_id == "auto-device"
+
+
+async def test_list_entities_with_cached_device_info(auth_client: APIClient) -> None:
+    """Test list_entities_services uses cached device_info without re-fetching."""
+    patch_api_version(auth_client, APIVersion(1, 14))
+    # First call device_info() to populate the cache
+    patch_response_simple(
+        auth_client,
+        DeviceInfoResponse(name="my-device", mac_address="AA:BB:CC:DD:EE:FF"),
+    )
+    device_info = await auth_client.device_info()
+    assert device_info.name == "my-device"
+
+    # Clear the simple response patch - list_entities_services should NOT call device_info again
+    auth_client._connection.send_message_await_response = None
+
+    # Now call list_entities_services - it should use cached device_info
+    # to fill in missing object_id values
+    patch_response_complex(
+        auth_client,
+        [
+            ListEntitiesBinarySensorResponse(name="My Sensor"),
+            ListEntitiesSensorResponse(name=""),  # Empty name, should use device name
+            ListEntitiesServicesResponse(),  # Also test services in cached path
+            ListEntitiesDoneResponse(),
+        ],
+    )
+    entities, services = await auth_client.list_entities_services()
+
+    assert len(entities) == 2
+    # Named entity gets object_id from its name
+    assert entities[0].object_id == "my_sensor"
+    # Empty-name entity gets object_id from device name
+    assert entities[1].object_id == "my-device"
+    # Verify services were parsed
+    assert len(services) == 1
+
+
+async def test_list_entities_no_object_id_fill_before_1_14(
+    auth_client: APIClient,
+) -> None:
+    """Test object_id is NOT filled for API version < 1.14."""
+    patch_api_version(auth_client, APIVersion(1, 13))
+
+    # Patch combined response
+    patch_response_complex(
+        auth_client,
+        [
+            DeviceInfoResponse(name="test-device", mac_address="AA:BB:CC:DD:EE:FF"),
+            ListEntitiesBinarySensorResponse(name=""),  # Empty name, no object_id
+            ListEntitiesDoneResponse(),
+        ],
+    )
+
+    entities, _services = await auth_client.list_entities_services()
+
+    # object_id should NOT be filled for API version < 1.14
+    assert len(entities) == 1
+    assert entities[0].object_id == ""  # Remains empty
+
+
+@pytest.mark.parametrize(
+    ("input_value", "output"),
+    [
+        (
+            [
+                DeviceInfoResponse(name="test", mac_address="AA:BB:CC:DD:EE:FF"),
+                ListEntitiesBinarySensorResponse(),
+                ListEntitiesDoneResponse(),
+            ],
+            (
+                DeviceInfo(name="test", mac_address="AA:BB:CC:DD:EE:FF"),
+                # Empty-name entity gets object_id from device name
+                [BinarySensorInfo(object_id="test")],
+                [],
+            ),
+        ),
+        (
+            [
+                DeviceInfoResponse(name="test2", mac_address="11:22:33:44:55:66"),
+                ListEntitiesServicesResponse(),
+                ListEntitiesSensorResponse(),
+                ListEntitiesDoneResponse(),
+            ],
+            (
+                DeviceInfo(name="test2", mac_address="11:22:33:44:55:66"),
+                # Empty-name entity gets object_id from device name
+                [SensorInfo(object_id="test2")],
+                [UserService()],
+            ),
+        ),
+    ],
+)
+async def test_device_info_and_list_entities(
+    auth_client: APIClient, input_value: list[Any], output: tuple[Any, Any, Any]
+) -> None:
+    patch_api_version(auth_client, APIVersion(1, 14))
+    patch_response_complex(auth_client, input_value)
+    resp = await auth_client.device_info_and_list_entities()
+    assert resp == output
+
+
+async def test_subscribe_states(auth_client: APIClient) -> None:
+    send = patch_response_callback(auth_client)
+    on_state = MagicMock()
+    auth_client.subscribe_states(on_state)
+    on_state.assert_not_called()
+
+    await send(BinarySensorStateResponse())
+    on_state.assert_called_once_with(BinarySensorState())
+
+
+async def test_subscribe_states_camera(auth_client: APIClient) -> None:
+    send = patch_response_callback(auth_client)
+    on_state = MagicMock()
+    auth_client.subscribe_states(on_state)
+    await send(CameraImageResponse(key=1, data=b"asdf"))
+    on_state.assert_not_called()
+
+    await send(CameraImageResponse(key=1, data=b"qwer", done=True))
+    on_state.assert_called_once_with(CameraState(key=1, data=b"asdfqwer"))
+
+
+async def test_subscribe_states_camera_with_device_id(auth_client: APIClient) -> None:
+    send = patch_response_callback(auth_client)
+    on_state = MagicMock()
+    auth_client.subscribe_states(on_state)
+
+    # Test with device_id=0 (default)
+    await send(CameraImageResponse(key=1, data=b"asdf", device_id=0))
+    on_state.assert_not_called()
+
+    await send(CameraImageResponse(key=1, data=b"qwer", done=True, device_id=0))
+    on_state.assert_called_once_with(CameraState(key=1, data=b"asdfqwer", device_id=0))
+
+    on_state.reset_mock()
+
+    # Test with device_id=5
+    await send(CameraImageResponse(key=2, data=b"test", device_id=5))
+    on_state.assert_not_called()
+
+    await send(CameraImageResponse(key=2, data=b"data", done=True, device_id=5))
+    on_state.assert_called_once_with(CameraState(key=2, data=b"testdata", device_id=5))
+
+
+async def test_subscribe_states_camera_drops_oversized_frame(
+    auth_client: APIClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test camera frames exceeding the per-stream byte cap are dropped."""
+    send = patch_response_callback(auth_client)
+    on_state = MagicMock()
+    auth_client.subscribe_states(on_state)
+
+    # First chunk fits under the cap.
+    await send(CameraImageResponse(key=1, data=b"a" * (MAX_CAMERA_FRAME_BYTES - 1)))
+    on_state.assert_not_called()
+
+    # Second chunk pushes us over the cap.
+    caplog.clear()
+    await send(CameraImageResponse(key=1, data=b"bb"))
+    on_state.assert_not_called()
+    assert "exceeded" in caplog.text
+
+    # Further non-done chunks for the same key are silently ignored — the
+    # peer must not be able to restart the stream once we've discarded it.
+    await send(CameraImageResponse(key=1, data=b"x"))
+    on_state.assert_not_called()
+
+    # done=True for the discarded key clears tracking but emits no frame,
+    # so a peer can't flush a truncated frame after we drop the buffer.
+    await send(CameraImageResponse(key=1, data=b"y", done=True))
+    on_state.assert_not_called()
+
+    # A new stream on the same key is accepted normally afterwards.
+    await send(CameraImageResponse(key=1, data=b"hi", done=True))
+    on_state.assert_called_once_with(CameraState(key=1, data=b"hi"))
+
+
+async def test_subscribe_states_camera_drops_when_too_many_inflight_keys(
+    auth_client: APIClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test a peer rotating cam_msg.key cannot grow image_stream without bound."""
+    send = patch_response_callback(auth_client)
+    on_state = MagicMock()
+    auth_client.subscribe_states(on_state)
+
+    # Fill the in-flight slots without ever sending done=True.
+    for k in range(MAX_INFLIGHT_CAMERA_KEYS):
+        await send(CameraImageResponse(key=k, data=b"chunk"))
+    on_state.assert_not_called()
+
+    # A new key beyond the cap is dropped at the warn level.
+    caplog.clear()
+    await send(CameraImageResponse(key=999, data=b"chunk", done=True))
+    on_state.assert_not_called()
+    assert "too many in-flight" in caplog.text
+
+
+async def test_subscribe_states_camera_oversized_done_chunk_does_not_tombstone(
+    auth_client: APIClient,
+) -> None:
+    """Test single-chunk oversized done=True frames don't fill image_stream with tombstones."""
+    send = patch_response_callback(auth_client)
+    on_state = MagicMock()
+    auth_client.subscribe_states(on_state)
+
+    # Send MAX_INFLIGHT_CAMERA_KEYS distinct keys, each as a single oversized
+    # done=True chunk. If we left tombstones, image_stream would fill up and
+    # subsequent legitimate streams would all be dropped at the in-flight cap.
+    for k in range(MAX_INFLIGHT_CAMERA_KEYS):
+        await send(
+            CameraImageResponse(
+                key=k, data=b"x" * (MAX_CAMERA_FRAME_BYTES + 1), done=True
+            )
+        )
+    on_state.assert_not_called()
+
+    # A legitimate stream on a fresh key must still be accepted.
+    await send(CameraImageResponse(key=42, data=b"ok", done=True))
+    on_state.assert_called_once_with(CameraState(key=42, data=b"ok"))
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        ({"key": 1}, {"key": 1}),
+        (
+            {"key": 1, "position": 1.0},
+            {
+                "key": 1,
+                "has_legacy_command": True,
+                "legacy_command": LegacyCoverCommand.OPEN,
+            },
+        ),
+        (
+            {"key": 1, "position": 0.0},
+            {
+                "key": 1,
+                "has_legacy_command": True,
+                "legacy_command": LegacyCoverCommand.CLOSE,
+            },
+        ),
+        (
+            {"key": 1, "stop": True},
+            {
+                "key": 1,
+                "has_legacy_command": True,
+                "legacy_command": LegacyCoverCommand.STOP,
+            },
+        ),
+    ],
+)
+async def test_cover_command_legacy(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+    patch_api_version(auth_client, APIVersion(1, 0))
+
+    auth_client.cover_command(**cmd)
+    send.assert_called_once_with(CoverCommandRequest(**req))
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        ({"key": 1}, {"key": 1}),
+        (
+            {"key": 1, "position": 0.5},
+            {"key": 1, "has_position": True, "position": 0.5},
+        ),
+        (
+            {"key": 1, "position": 0.0},
+            {"key": 1, "has_position": True, "position": 0.0},
+        ),
+        ({"key": 1, "stop": True}, {"key": 1, "stop": True}),
+        (
+            {"key": 1, "position": 1.0, "tilt": 0.8},
+            {
+                "key": 1,
+                "has_position": True,
+                "position": 1.0,
+                "has_tilt": True,
+                "tilt": 0.8,
+            },
+        ),
+    ],
+)
+async def test_cover_command(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+    patch_api_version(auth_client, APIVersion(1, 1))
+
+    auth_client.cover_command(**cmd)
+    send.assert_called_once_with(CoverCommandRequest(**req))
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        ({"key": 1}, {"key": 1}),
+        ({"key": 1, "state": True}, {"key": 1, "has_state": True, "state": True}),
+        (
+            {"key": 1, "speed": FanSpeed.LOW},
+            {"key": 1, "has_speed": True, "speed": FanSpeed.LOW},
+        ),
+        (
+            {"key": 1, "speed_level": 10},
+            {"key": 1, "has_speed_level": True, "speed_level": 10},
+        ),
+        (
+            {"key": 1, "oscillating": False},
+            {"key": 1, "has_oscillating": True, "oscillating": False},
+        ),
+        (
+            {"key": 1, "direction": FanDirection.REVERSE},
+            {"key": 1, "has_direction": True, "direction": FanDirection.REVERSE},
+        ),
+        (
+            {"key": 1, "preset_mode": "auto"},
+            {"key": 1, "has_preset_mode": True, "preset_mode": "auto"},
+        ),
+    ],
+)
+async def test_fan_command(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+
+    auth_client.fan_command(**cmd)
+    send.assert_called_once_with(FanCommandRequest(**req))
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        ({"key": 1}, {"key": 1}),
+        ({"key": 1, "state": True}, {"key": 1, "has_state": True, "state": True}),
+        (
+            {"key": 1, "brightness": 0.8},
+            {"key": 1, "has_brightness": True, "brightness": 0.8},
+        ),
+        (
+            {"key": 1, "rgb": (0.1, 0.5, 1.0)},
+            {"key": 1, "has_rgb": True, "red": 0.1, "green": 0.5, "blue": 1.0},
+        ),
+        ({"key": 1, "white": 0.0}, {"key": 1, "has_white": True, "white": 0.0}),
+        (
+            {"key": 1, "color_temperature": 0.0},
+            {"key": 1, "has_color_temperature": True, "color_temperature": 0.0},
+        ),
+        (
+            {"key": 1, "color_brightness": 0.0},
+            {"key": 1, "has_color_brightness": True, "color_brightness": 0.0},
+        ),
+        (
+            {"key": 1, "cold_white": 1.0, "warm_white": 2.0},
+            {
+                "key": 1,
+                "has_cold_white": True,
+                "cold_white": 1.0,
+                "has_warm_white": True,
+                "warm_white": 2.0,
+            },
+        ),
+        (
+            {"key": 1, "transition_length": 0.1},
+            {"key": 1, "has_transition_length": True, "transition_length": 100},
+        ),
+        (
+            {"key": 1, "flash_length": 0.1},
+            {"key": 1, "has_flash_length": True, "flash_length": 100},
+        ),
+        (
+            {"key": 1, "effect": "special"},
+            {"key": 1, "has_effect": True, "effect": "special"},
+        ),
+        (
+            {
+                "key": 1,
+                "color_mode": LightColorCapability.COLOR_TEMPERATURE,
+                "color_temperature": 153.0,
+            },
+            {
+                "key": 1,
+                "has_color_mode": True,
+                "color_mode": LightColorCapability.COLOR_TEMPERATURE,
+                "has_color_temperature": True,
+                "color_temperature": 153.0,
+            },
+        ),
+    ],
+)
+async def test_light_command(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+
+    auth_client.light_command(**cmd)
+    send.assert_called_once_with(LightCommandRequest(**req))
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        ({"key": 1, "state": False}, {"key": 1, "state": False}),
+        ({"key": 1, "state": True}, {"key": 1, "state": True}),
+    ],
+)
+async def test_switch_command(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+
+    auth_client.switch_command(**cmd)
+    send.assert_called_once_with(SwitchCommandRequest(**req))
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        (
+            {"key": 1, "mode": WaterHeaterMode.ECO},
+            {
+                "key": 1,
+                "device_id": 0,
+                "has_fields": WaterHeaterCommandField.MODE,
+                "mode": WaterHeaterMode.ECO,
+            },
+        ),
+        (
+            {"key": 1, "target_temperature": 55.0},
+            {
+                "key": 1,
+                "device_id": 0,
+                "has_fields": WaterHeaterCommandField.TARGET_TEMPERATURE,
+                "target_temperature": 55.0,
+            },
+        ),
+        (
+            {"key": 1, "away": True},
+            {
+                "key": 1,
+                "device_id": 0,
+                "has_fields": WaterHeaterCommandField.AWAY_STATE,
+                "state": WaterHeaterStateFlag.AWAY,
+            },
+        ),
+        (
+            {"key": 1, "on": True},
+            {
+                "key": 1,
+                "device_id": 0,
+                "has_fields": WaterHeaterCommandField.ON_STATE,
+                "state": WaterHeaterStateFlag.ON,
+            },
+        ),
+        (
+            {"key": 1, "away": True, "on": True},
+            {
+                "key": 1,
+                "device_id": 0,
+                "has_fields": WaterHeaterCommandField.AWAY_STATE
+                | WaterHeaterCommandField.ON_STATE,
+                "state": WaterHeaterStateFlag.AWAY | WaterHeaterStateFlag.ON,
+            },
+        ),
+        (
+            {"key": 1, "away": False, "on": False},
+            {
+                "key": 1,
+                "device_id": 0,
+                "has_fields": WaterHeaterCommandField.AWAY_STATE
+                | WaterHeaterCommandField.ON_STATE,
+                "state": WaterHeaterStateFlag(0),
+            },
+        ),
+        (
+            {"key": 1, "target_temperature_low": 40.0},
+            {
+                "key": 1,
+                "device_id": 0,
+                "has_fields": WaterHeaterCommandField.TARGET_TEMPERATURE_LOW,
+                "target_temperature_low": 40.0,
+            },
+        ),
+        (
+            {"key": 1, "target_temperature_high": 60.0},
+            {
+                "key": 1,
+                "device_id": 0,
+                "has_fields": WaterHeaterCommandField.TARGET_TEMPERATURE_HIGH,
+                "target_temperature_high": 60.0,
+            },
+        ),
+        (
+            {
+                "key": 1,
+                "target_temperature_low": 40.0,
+                "target_temperature_high": 60.0,
+            },
+            {
+                "key": 1,
+                "device_id": 0,
+                "has_fields": WaterHeaterCommandField.TARGET_TEMPERATURE_LOW
+                | WaterHeaterCommandField.TARGET_TEMPERATURE_HIGH,
+                "target_temperature_low": 40.0,
+                "target_temperature_high": 60.0,
+            },
+        ),
+    ],
+)
+async def test_water_heater_command(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+
+    auth_client.water_heater_command(**cmd)
+
+    send.assert_called_once_with(WaterHeaterCommandRequest(**req))
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        (
+            {"key": 1, "preset": ClimatePreset.HOME},
+            {"key": 1, "unused_has_legacy_away": True, "unused_legacy_away": False},
+        ),
+        (
+            {"key": 1, "preset": ClimatePreset.AWAY},
+            {"key": 1, "unused_has_legacy_away": True, "unused_legacy_away": True},
+        ),
+    ],
+)
+async def test_climate_command_legacy(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+    patch_api_version(auth_client, APIVersion(1, 4))
+
+    auth_client.climate_command(**cmd)
+    send.assert_called_once_with(ClimateCommandRequest(**req))
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        (
+            {"key": 1, "mode": ClimateMode.HEAT},
+            {"key": 1, "has_mode": True, "mode": ClimateMode.HEAT},
+        ),
+        (
+            {"key": 1, "target_temperature": 21.0},
+            {"key": 1, "has_target_temperature": True, "target_temperature": 21.0},
+        ),
+        (
+            {"key": 1, "target_temperature_low": 21.0},
+            {
+                "key": 1,
+                "has_target_temperature_low": True,
+                "target_temperature_low": 21.0,
+            },
+        ),
+        (
+            {"key": 1, "target_temperature_high": 21.0},
+            {
+                "key": 1,
+                "has_target_temperature_high": True,
+                "target_temperature_high": 21.0,
+            },
+        ),
+        (
+            {"key": 1, "fan_mode": ClimateFanMode.LOW},
+            {"key": 1, "has_fan_mode": True, "fan_mode": ClimateFanMode.LOW},
+        ),
+        (
+            {"key": 1, "swing_mode": ClimateSwingMode.OFF},
+            {"key": 1, "has_swing_mode": True, "swing_mode": ClimateSwingMode.OFF},
+        ),
+        (
+            {"key": 1, "custom_fan_mode": "asdf"},
+            {"key": 1, "has_custom_fan_mode": True, "custom_fan_mode": "asdf"},
+        ),
+        (
+            {"key": 1, "preset": ClimatePreset.AWAY},
+            {"key": 1, "has_preset": True, "preset": ClimatePreset.AWAY},
+        ),
+        (
+            {"key": 1, "custom_preset": "asdf"},
+            {"key": 1, "has_custom_preset": True, "custom_preset": "asdf"},
+        ),
+        (
+            {"key": 1, "target_humidity": 60.0},
+            {"key": 1, "has_target_humidity": True, "target_humidity": 60.0},
+        ),
+    ],
+)
+async def test_climate_command(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+    patch_api_version(auth_client, APIVersion(1, 5))
+
+    auth_client.climate_command(**cmd)
+    send.assert_called_once_with(ClimateCommandRequest(**req))
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        ({"key": 1, "state": 0.0}, {"key": 1, "state": 0.0}),
+        ({"key": 1, "state": 100.0}, {"key": 1, "state": 100.0}),
+    ],
+)
+async def test_number_command(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+
+    auth_client.number_command(**cmd)
+    send.assert_called_once_with(NumberCommandRequest(**req))
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        (
+            {"key": 1, "year": 2024, "month": 2, "day": 29},
+            {"key": 1, "year": 2024, "month": 2, "day": 29},
+        ),
+        (
+            {"key": 1, "year": 2000, "month": 6, "day": 10},
+            {"key": 1, "year": 2000, "month": 6, "day": 10},
+        ),
+    ],
+)
+async def test_date_command(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+
+    auth_client.date_command(**cmd)
+    send.assert_called_once_with(DateCommandRequest(**req))
+
+
+# Test time command
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        (
+            {"key": 1, "hour": 12, "minute": 30, "second": 30},
+            {"key": 1, "hour": 12, "minute": 30, "second": 30},
+        ),
+        (
+            {"key": 1, "hour": 0, "minute": 0, "second": 0},
+            {"key": 1, "hour": 0, "minute": 0, "second": 0},
+        ),
+    ],
+)
+async def test_time_command(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+
+    auth_client.time_command(**cmd)
+    send.assert_called_once_with(TimeCommandRequest(**req))
+
+
+# Test date_time command
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        (
+            {"key": 1, "epoch_seconds": 1735648230},
+            {"key": 1, "epoch_seconds": 1735648230},
+        ),
+        (
+            {"key": 1, "epoch_seconds": 1735689600},
+            {"key": 1, "epoch_seconds": 1735689600},
+        ),
+    ],
+)
+async def test_datetime_command(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+
+    auth_client.datetime_command(**cmd)
+    send.assert_called_once_with(DateTimeCommandRequest(**req))
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        (
+            {"key": 1, "command": LockCommand.LOCK},
+            {"key": 1, "command": LockCommand.LOCK},
+        ),
+        (
+            {"key": 1, "command": LockCommand.UNLOCK},
+            {"key": 1, "command": LockCommand.UNLOCK},
+        ),
+        (
+            {"key": 1, "command": LockCommand.OPEN},
+            {"key": 1, "command": LockCommand.OPEN},
+        ),
+        (
+            {"key": 1, "command": LockCommand.OPEN, "code": "1234"},
+            {"key": 1, "command": LockCommand.OPEN, "code": "1234"},
+        ),
+    ],
+)
+async def test_lock_command(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+
+    auth_client.lock_command(**cmd)
+    send.assert_called_once_with(LockCommandRequest(**req))
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        ({"key": 1}, {"key": 1}),
+        (
+            {"key": 1, "position": 1.0},
+            {"key": 1, "position": 1.0, "has_position": True},
+        ),
+        (
+            {"key": 1, "position": 0.0},
+            {"key": 1, "position": 0.0, "has_position": True},
+        ),
+        ({"key": 1, "stop": True}, {"key": 1, "stop": True}),
+    ],
+)
+async def test_valve_command(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+
+    auth_client.valve_command(**cmd)
+    send.assert_called_once_with(ValveCommandRequest(**req))
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        ({"key": 1}, {"key": 1}),
+        (
+            {"key": 1, "position": 0.5},
+            {"key": 1, "has_position": True, "position": 0.5},
+        ),
+        (
+            {"key": 1, "position": 0.0},
+            {"key": 1, "has_position": True, "position": 0.0},
+        ),
+        ({"key": 1, "stop": True}, {"key": 1, "stop": True}),
+        (
+            {"key": 1, "position": 1.0},
+            {"key": 1, "has_position": True, "position": 1.0},
+        ),
+    ],
+)
+async def test_valve_command_version_1_1(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+    patch_api_version(auth_client, APIVersion(1, 1))
+
+    auth_client.valve_command(**cmd)
+    send.assert_called_once_with(ValveCommandRequest(**req))
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        ({"key": 1, "state": "One"}, {"key": 1, "state": "One"}),
+        ({"key": 1, "state": "Two"}, {"key": 1, "state": "Two"}),
+    ],
+)
+async def test_select_command(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+
+    auth_client.select_command(**cmd)
+    send.assert_called_once_with(SelectCommandRequest(**req))
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        (
+            {"key": 1, "command": MediaPlayerCommand.MUTE},
+            {"key": 1, "has_command": True, "command": MediaPlayerCommand.MUTE},
+        ),
+        (
+            {"key": 1, "volume": 1.0},
+            {"key": 1, "has_volume": True, "volume": 1.0},
+        ),
+        (
+            {"key": 1, "media_url": "http://example.com"},
+            {"key": 1, "has_media_url": True, "media_url": "http://example.com"},
+        ),
+        (
+            {"key": 1, "media_url": "http://example.com", "announcement": True},
+            {
+                "key": 1,
+                "has_media_url": True,
+                "media_url": "http://example.com",
+                "has_announcement": True,
+                "announcement": True,
+            },
+        ),
+    ],
+)
+async def test_media_player_command(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+
+    auth_client.media_player_command(**cmd)
+    send.assert_called_once_with(MediaPlayerCommandRequest(**req))
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        ({"key": 1}, {"key": 1}),
+    ],
+)
+async def test_button_command(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+
+    auth_client.button_command(**cmd)
+    send.assert_called_once_with(ButtonCommandRequest(**req))
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        ({"key": 1, "state": True}, {"key": 1, "state": True, "has_state": True}),
+        ({"key": 1, "state": False}, {"key": 1, "state": False, "has_state": True}),
+        ({"key": 1, "state": None}, {"key": 1, "state": None, "has_state": False}),
+        (
+            {"key": 1, "state": True, "tone": "any"},
+            {
+                "key": 1,
+                "state": True,
+                "has_state": True,
+                "has_tone": True,
+                "tone": "any",
+            },
+        ),
+        (
+            {"key": 1, "state": True, "tone": None},
+            {
+                "key": 1,
+                "state": True,
+                "has_state": True,
+                "has_tone": False,
+                "tone": None,
+            },
+        ),
+        (
+            {"key": 1, "state": True, "volume": 5},
+            {
+                "key": 1,
+                "state": True,
+                "has_volume": True,
+                "volume": 5,
+                "has_state": True,
+            },
+        ),
+        (
+            {"key": 1, "state": True, "duration": 5},
+            {
+                "key": 1,
+                "state": True,
+                "has_duration": True,
+                "duration": 5,
+                "has_state": True,
+            },
+        ),
+    ],
+)
+async def test_siren_command(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+
+    auth_client.siren_command(**cmd)
+    send.assert_called_once_with(SirenCommandRequest(**req))
+
+
+async def test_execute_service(auth_client: APIClient) -> None:
+    send = patch_send(auth_client)
+    patch_api_version(auth_client, APIVersion(1, 3))
+
+    service = UserService(
+        name="my_service",
+        key=1,
+        args=[
+            UserServiceArg(name="arg1", type=UserServiceArgType.BOOL),
+            UserServiceArg(name="arg2", type=UserServiceArgType.INT),
+            UserServiceArg(name="arg3", type=UserServiceArgType.FLOAT),
+            UserServiceArg(name="arg4", type=UserServiceArgType.STRING),
+            UserServiceArg(name="arg5", type=UserServiceArgType.BOOL_ARRAY),
+            UserServiceArg(name="arg6", type=UserServiceArgType.INT_ARRAY),
+            UserServiceArg(name="arg7", type=UserServiceArgType.FLOAT_ARRAY),
+            UserServiceArg(name="arg8", type=UserServiceArgType.STRING_ARRAY),
+        ],
+    )
+
+    with pytest.raises(KeyError):
+        await auth_client.execute_service(service, data={})
+
+    await auth_client.execute_service(
+        service,
+        data={
+            "arg1": False,
+            "arg2": 42,
+            "arg3": 99.0,
+            "arg4": "asdf",
+            "arg5": [False, True, False],
+            "arg6": [42, 10, 9],
+            "arg7": [0.0, -100.0],
+            "arg8": [],
+        },
+    )
+    send.assert_called_once_with(
+        ExecuteServiceRequest(
+            key=1,
+            args=[
+                ExecuteServiceArgument(bool_=False),
+                ExecuteServiceArgument(int_=42),
+                ExecuteServiceArgument(float_=99.0),
+                ExecuteServiceArgument(string_="asdf"),
+                ExecuteServiceArgument(bool_array=[False, True, False]),
+                ExecuteServiceArgument(int_array=[42, 10, 9]),
+                ExecuteServiceArgument(float_array=[0.0, -100.0]),
+                ExecuteServiceArgument(string_array=[]),
+            ],
+        )
+    )
+    send.reset_mock()
+
+    patch_api_version(auth_client, APIVersion(1, 2))
+    service = UserService(
+        name="my_service",
+        key=2,
+        args=[
+            UserServiceArg(name="arg1", type=UserServiceArgType.BOOL),
+            UserServiceArg(name="arg2", type=UserServiceArgType.INT),
+        ],
+    )
+
+    # Test legacy_int
+    await auth_client.execute_service(
+        service,
+        data={
+            "arg1": False,
+            "arg2": 42,
+        },
+    )
+    send.assert_called_once_with(
+        ExecuteServiceRequest(
+            key=2,
+            args=[
+                ExecuteServiceArgument(bool_=False),
+                ExecuteServiceArgument(legacy_int=42),
+            ],
+        )
+    )
+    send.reset_mock()
+
+    # Test arg order
+    await auth_client.execute_service(
+        service,
+        data={
+            "arg2": 42,
+            "arg1": False,
+        },
+    )
+    send.assert_called_once_with(
+        ExecuteServiceRequest(
+            key=2,
+            args=[
+                ExecuteServiceArgument(bool_=False),
+                ExecuteServiceArgument(legacy_int=42),
+            ],
+        )
+    )
+    send.reset_mock()
+
+
+async def test_execute_service_with_call_id(auth_client: APIClient) -> None:
+    """Test that call_id is auto-generated when return_response is set."""
+    send = patch_send(auth_client)
+    patch_api_version(auth_client, APIVersion(1, 3))
+
+    service = UserService(
+        name="my_service",
+        key=1,
+        args=[
+            UserServiceArg(name="arg1", type=UserServiceArgType.BOOL),
+        ],
+    )
+
+    # Test without return_response - call_id should be 0
+    await auth_client.execute_service(
+        service,
+        data={"arg1": True},
+    )
+    req = send.call_args[0][0]
+    assert req.call_id == 0
+    send.reset_mock()
+
+    # Test with return_response=True - call_id should be auto-generated (non-zero)
+    # Use short timeout since no response will come, we just want to verify the request
+    with pytest.raises(asyncio.TimeoutError):
+        await auth_client.execute_service(
+            service,
+            data={"arg1": False},
+            return_response=True,
+            timeout=0.01,
+        )
+    req = send.call_args[0][0]
+    assert req.call_id != 0  # Auto-generated
+    first_call_id = req.call_id
+    send.reset_mock()
+
+    # Test that call_id increments
+    with pytest.raises(asyncio.TimeoutError):
+        await auth_client.execute_service(
+            service,
+            data={"arg1": True},
+            return_response=True,
+            timeout=0.01,
+        )
+    req = send.call_args[0][0]
+    assert req.call_id == first_call_id + 1
+
+
+async def test_execute_service_return_response_combinations(
+    auth_client: APIClient,
+) -> None:
+    """Test return_response behavior and call_id generation."""
+    send = patch_send(auth_client)
+    patch_api_version(auth_client, APIVersion(1, 3))
+
+    service = UserService(
+        name="test_service",
+        key=1,
+        args=[],
+    )
+
+    # Case 1: return_response=None (default) -> call_id=0, no waiting
+    await auth_client.execute_service(service, data={})
+    assert send.call_args[0][0].call_id == 0
+    send.reset_mock()
+
+    # Case 2: return_response=True -> generates call_id, waits for response
+    with pytest.raises(asyncio.TimeoutError):
+        await auth_client.execute_service(
+            service, data={}, return_response=True, timeout=0.01
+        )
+    assert send.call_args[0][0].return_response is True
+    assert send.call_args[0][0].call_id != 0
+    send.reset_mock()
+
+    # Case 3: return_response=False -> generates call_id, waits for response
+    with pytest.raises(asyncio.TimeoutError):
+        await auth_client.execute_service(
+            service, data={}, return_response=False, timeout=0.01
+        )
+    assert send.call_args[0][0].return_response is False
+    assert send.call_args[0][0].call_id != 0
+    send.reset_mock()
+
+
+async def test_request_single_image(auth_client: APIClient) -> None:
+    send = patch_send(auth_client)
+
+    auth_client.request_single_image()
+    send.assert_called_once_with(CameraImageRequest(single=True, stream=False))
+
+
+async def test_request_image_stream(auth_client: APIClient) -> None:
+    send = patch_send(auth_client)
+
+    auth_client.request_image_stream()
+    send.assert_called_once_with(CameraImageRequest(single=False, stream=True))
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        (
+            {"key": 1, "command": AlarmControlPanelCommand.ARM_AWAY},
+            {"key": 1, "command": AlarmControlPanelCommand.ARM_AWAY, "code": None},
+        ),
+        (
+            {"key": 1, "command": AlarmControlPanelCommand.ARM_HOME},
+            {"key": 1, "command": AlarmControlPanelCommand.ARM_HOME, "code": None},
+        ),
+        (
+            {"key": 1, "command": AlarmControlPanelCommand.DISARM, "code": "1234"},
+            {"key": 1, "command": AlarmControlPanelCommand.DISARM, "code": "1234"},
+        ),
+    ],
+)
+async def test_alarm_panel_command(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+
+    auth_client.alarm_control_panel_command(**cmd)
+    send.assert_called_once_with(AlarmControlPanelCommandRequest(**req))
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        ({"key": 1, "state": "hello world"}, {"key": 1, "state": "hello world"}),
+        ({"key": 1, "state": "goodbye"}, {"key": 1, "state": "goodbye"}),
+    ],
+)
+async def test_text_command(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+
+    auth_client.text_command(**cmd)
+    send.assert_called_once_with(TextCommandRequest(**req))
+
+
+@pytest.mark.parametrize(
+    ("cmd", "req"),
+    [
+        (
+            {"key": 1, "command": UpdateCommand.INSTALL},
+            {"key": 1, "command": UpdateCommand.INSTALL},
+        ),
+        (
+            {"key": 1, "command": UpdateCommand.CHECK},
+            {"key": 1, "command": UpdateCommand.CHECK},
+        ),
+    ],
+)
+async def test_update_command(
+    auth_client: APIClient, cmd: dict[str, Any], req: dict[str, Any]
+) -> None:
+    send = patch_send(auth_client)
+
+    auth_client.update_command(**cmd)
+    send.assert_called_once_with(UpdateCommandRequest(**req))
+
+
+async def test_set_cached_name_if_unset_subclassed_string():
+    """Test set_cached_name_if_unset with a subclassed string."""
+    cli = PatchableAPIClient(
+        address="127.0.0.1",
+        port=6052,
+        password=None,
+        noise_psk="QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc=",
+        expected_name="mydevice",
+    )
+    cli.set_cached_name_if_unset(Estr("mydevice"))
+    assert cli.log_name == "mydevice @ 127.0.0.1"
+
+
+async def test_noise_psk_handles_subclassed_string():
+    """Test that the noise_psk gets converted to a string."""
+    cli = PatchableAPIClient(
+        address=Estr("127.0.0.1"),
+        port=6052,
+        password=None,
+        noise_psk=Estr("QRTIErOb/fcE9Ukd/5qA3RGYMn0Y+p06U58SCtOXvPc="),
+        expected_name=Estr("mydevice"),
+    )
+    # Make sure its not a subclassed string
+    assert type(cli._params.noise_psk) is str
+    assert type(cli._params.addresses[0]) is str
+    assert type(cli._params.expected_name) is str
+
+    rl = ReconnectLogic(
+        client=cli,
+        on_disconnect=AsyncMock(),
+        on_connect=AsyncMock(),
+        zeroconf_instance=get_mock_zeroconf(),
+        name="mydevice",
+    )
+    assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+
+    with (
+        patch.object(cli, "start_resolve_host"),
+        patch.object(cli, "start_connection"),
+        patch.object(cli, "finish_connection"),
+    ):
+        await rl.start()
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+    rl.stop_callback()
+    # Wait for cancellation to propagate
+    for _ in range(4):
+        await asyncio.sleep(0)
+    assert rl._connection_state is ReconnectLogicState.DISCONNECTED
+
+
+async def test_no_noise_psk():
+    """Test not using a noise_psk."""
+    cli = APIClient(
+        address=Estr("127.0.0.1"),
+        port=6052,
+        password=None,
+        noise_psk=None,
+        expected_name=Estr("mydevice"),
+    )
+    # Make sure its not a subclassed string
+    assert cli._params.noise_psk is None
+    assert type(cli._params.addresses[0]) is str
+    assert type(cli._params.expected_name) is str
+
+
+async def test_empty_noise_psk_or_expected_name():
+    """Test an empty noise_psk is treated as None."""
+    cli = APIClient(
+        address=Estr("127.0.0.1"),
+        port=6052,
+        password=None,
+        noise_psk="",
+        expected_name="",
+    )
+    assert cli._params.noise_psk is None
+    assert type(cli._params.addresses[0]) is str
+    assert cli._params.expected_name is None
+
+
+async def test_addresses_parameter_handles_subclassed_string() -> None:
+    """Test that the addresses parameter gets converted to a list of strings."""
+    cli = APIClient(
+        address=Estr("127.0.0.1"),
+        port=6052,
+        password=None,
+        noise_psk=None,
+        expected_name=None,
+        addresses=[Estr("192.168.1.100"), Estr("192.168.1.101"), Estr("10.0.0.1")],
+    )
+    # Make sure all addresses are converted to regular strings
+    assert len(cli._params.addresses) == 3
+    assert all(type(addr) is str for addr in cli._params.addresses)
+    assert cli._params.addresses[0] == "192.168.1.100"
+    assert cli._params.addresses[1] == "192.168.1.101"
+    assert cli._params.addresses[2] == "10.0.0.1"
+
+
+async def test_client_properties(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test getting the connected address."""
+    client, _connection, _transport, _protocol = api_client
+    assert client.connected_address == "10.0.0.512"
+    assert client.expected_name is None
+    assert client.address == "mydevice.local"
+    assert client.port == 6052
+    assert client.noise_psk is None
+    assert client.api_version == APIVersion(major=1, minor=9)
+    assert client.loop is asyncio.get_running_loop()
+
+
+async def test_bluetooth_disconnect(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_device_disconnect."""
+    client, _connection, _transport, protocol = api_client
+    disconnect_task = asyncio.create_task(client.bluetooth_device_disconnect(1234))
+    await asyncio.sleep(0)
+    response: message.Message = BluetoothDeviceConnectionResponse(
+        address=1234, connected=False
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await disconnect_task
+
+
+async def test_bluetooth_pair(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_device_pair."""
+    client, _connection, _transport, protocol = api_client
+    pair_task = asyncio.create_task(client.bluetooth_device_pair(1234))
+    await asyncio.sleep(0)
+    response: message.Message = BluetoothDevicePairingResponse(address=4567)
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await asyncio.sleep(0)
+    assert not pair_task.done()
+    response: message.Message = BluetoothDevicePairingResponse(address=1234)
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await pair_task
+
+
+async def test_bluetooth_pair_connection_drops(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test connection drop during bluetooth_device_pair."""
+    client, _connection, _transport, protocol = api_client
+    pair_task = asyncio.create_task(client.bluetooth_device_pair(1234))
+    await asyncio.sleep(0)
+    response: message.Message = BluetoothDeviceConnectionResponse(
+        address=1234, connected=False, error=13
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    message = (
+        "Peripheral 00:00:00:00:04:D2 changed connection status while waiting"
+        " for BluetoothDevicePairingResponse: Invalid attribute length"
+    )
+    with pytest.raises(BluetoothConnectionDroppedError, match=message):
+        await pair_task
+
+
+async def test_bluetooth_unpair_connection_drops(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test connection drop during bluetooth_device_unpair."""
+    client, _connection, _transport, protocol = api_client
+    pair_task = asyncio.create_task(client.bluetooth_device_unpair(1234))
+    await asyncio.sleep(0)
+    response: message.Message = BluetoothDeviceConnectionResponse(
+        address=1234, connected=False, error=13
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    message = (
+        "Peripheral 00:00:00:00:04:D2 changed connection status while waiting"
+        " for BluetoothDeviceUnpairingResponse: Invalid attribute length"
+    )
+    with pytest.raises(BluetoothConnectionDroppedError, match=message):
+        await pair_task
+
+
+async def test_bluetooth_clear_cache_connection_drops(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test connection drop during bluetooth_device_clear_cache."""
+    client, _connection, _transport, protocol = api_client
+    pair_task = asyncio.create_task(client.bluetooth_device_clear_cache(1234))
+    await asyncio.sleep(0)
+    response: message.Message = BluetoothDeviceConnectionResponse(
+        address=1234, connected=False, error=13
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    message = (
+        "Peripheral 00:00:00:00:04:D2 changed connection status while waiting"
+        " for BluetoothDeviceClearCacheResponse: Invalid attribute length"
+    )
+    with pytest.raises(BluetoothConnectionDroppedError, match=message):
+        await pair_task
+
+
+async def test_bluetooth_unpair(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_device_unpair."""
+    client, _connection, _transport, protocol = api_client
+    unpair_task = asyncio.create_task(client.bluetooth_device_unpair(1234))
+    await asyncio.sleep(0)
+    response: message.Message = BluetoothDeviceUnpairingResponse(address=1234)
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await unpair_task
+
+
+async def test_bluetooth_clear_cache(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_device_clear_cache."""
+    client, _connection, _transport, protocol = api_client
+    clear_task = asyncio.create_task(client.bluetooth_device_clear_cache(1234))
+    await asyncio.sleep(0)
+    response: message.Message = BluetoothDeviceClearCacheResponse(address=1234)
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await clear_task
+
+
+async def test_bluetooth_set_connection_params(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_device_set_connection_params."""
+    client, _connection, _transport, protocol = api_client
+    set_params_task = asyncio.create_task(
+        client.bluetooth_device_set_connection_params(1234, 6, 12, 0, 200)
+    )
+    await asyncio.sleep(0)
+    # Send response for wrong address first — should be ignored
+    wrong_response: message.Message = BluetoothSetConnectionParamsResponse(address=5678)
+    mock_data_received(protocol, generate_plaintext_packet(wrong_response))
+    assert not set_params_task.done()
+    # Now send correct response
+    response: message.Message = BluetoothSetConnectionParamsResponse(address=1234)
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await set_params_task
+
+
+async def test_bluetooth_set_connection_params_connection_drops(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test connection drop during bluetooth_device_set_connection_params."""
+    client, _connection, _transport, protocol = api_client
+    set_params_task = asyncio.create_task(
+        client.bluetooth_device_set_connection_params(1234, 6, 12, 0, 200)
+    )
+    await asyncio.sleep(0)
+    response: message.Message = BluetoothDeviceConnectionResponse(
+        address=1234, connected=False, error=13
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    msg = (
+        "Peripheral 00:00:00:00:04:D2 changed connection status while waiting"
+        " for BluetoothSetConnectionParamsResponse: Invalid attribute length"
+    )
+    with pytest.raises(BluetoothConnectionDroppedError, match=msg):
+        await set_params_task
+
+
+async def test_bluetooth_set_connection_params_error(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_device_set_connection_params with error response."""
+    client, _connection, _transport, protocol = api_client
+    set_params_task = asyncio.create_task(
+        client.bluetooth_device_set_connection_params(1234, 6, 12, 0, 200)
+    )
+    await asyncio.sleep(0)
+    response: message.Message = BluetoothSetConnectionParamsResponse(
+        address=1234, error=13
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    with pytest.raises(BluetoothConnectionParamsAPIError):
+        await set_params_task
+
+
+@pytest.mark.parametrize(
+    ("args", "match"),
+    [
+        ((5, 800, 0, 300), "min_interval must be between 6 and 3200"),
+        ((3201, 3201, 0, 300), "min_interval must be between 6 and 3200"),
+        ((6, 5, 0, 300), "max_interval must be between 6 and 3200"),
+        ((6, 3201, 0, 300), "max_interval must be between 6 and 3200"),
+        ((100, 50, 0, 300), "must be >= min_interval"),
+        ((6, 800, -1, 300), "latency must be between 0 and 499"),
+        ((6, 800, 500, 3200), "latency must be between 0 and 499"),
+        ((6, 800, 0, 9), "timeout must be between 10 and 3200"),
+        ((6, 800, 0, 3201), "timeout must be between 10 and 3200"),
+        # timeout * 4 must exceed (1 + latency) * max_interval.
+        # With latency=0, max_interval=800 → boundary is timeout=200; 200 fails.
+        ((6, 800, 0, 200), "Supervision timeout must satisfy"),
+    ],
+)
+def test_validate_connection_params_rejects_out_of_spec(
+    args: tuple[int, int, int, int], match: str
+) -> None:
+    """Out-of-spec values raise ValueError naming the offending parameter."""
+    with pytest.raises(ValueError, match=match):
+        _validate_connection_params(*args)
+
+
+def test_validate_connection_params_accepts_boundary_values() -> None:
+    """Smallest and largest in-spec values are accepted."""
+    # Smallest valid: timeout * 4 > (1 + 0) * 6 → timeout >= 2, but spec
+    # minimum supervision timeout is 10.
+    _validate_connection_params(6, 6, 0, 10)
+    # Largest valid: needs timeout * 4 > (1 + 0) * 3200 → timeout > 800.
+    _validate_connection_params(6, 3200, 0, 801)
+    # Max latency with headroom on timeout.
+    _validate_connection_params(6, 6, 499, 3200)
+
+
+async def test_bluetooth_set_connection_params_validation(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Bad params raise ValueError before any frame is sent."""
+    client, _connection, transport, _protocol = api_client
+    transport.reset_mock()
+    with pytest.raises(ValueError, match="min_interval must be between"):
+        await client.bluetooth_device_set_connection_params(1234, 0, 0, 0, 0)
+    transport.write.assert_not_called()
+
+
+async def test_device_info(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test fetching device info."""
+    client, _connection, _transport, protocol = api_client
+    assert client.log_name == "fake @ 10.0.0.512"
+    device_info_task = asyncio.create_task(client.device_info())
+    await asyncio.sleep(0)
+    response: message.Message = DeviceInfoResponse(
+        name="realname",
+        friendly_name="My Device",
+        has_deep_sleep=True,
+        mac_address="AA:BB:CC:DD:EE:FB",
+        bluetooth_mac_address="AA:BB:CC:DD:EE:FF",
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    device_info = await device_info_task
+    assert device_info.name == "realname"
+    assert device_info.friendly_name == "My Device"
+    assert device_info.has_deep_sleep
+    assert device_info.mac_address == "AA:BB:CC:DD:EE:FB"
+    assert device_info.bluetooth_mac_address == "AA:BB:CC:DD:EE:FF"
+    assert client.log_name == "realname @ 10.0.0.512"
+    disconnect_task = asyncio.create_task(client.disconnect())
+    await asyncio.sleep(0)
+    response: message.Message = DisconnectResponse()
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await disconnect_task
+    with pytest.raises(APIConnectionError, match="Not connected"):
+        await client.device_info()
+
+
+async def test_device_info_sanitizes_name(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """CRLF/ANSI bytes in DeviceInfo.name must be stripped from cached_name/log_name."""
+    client, _connection, _transport, protocol = api_client
+    device_info_task = asyncio.create_task(client.device_info())
+    await asyncio.sleep(0)
+    response: message.Message = DeviceInfoResponse(
+        name="evil\r\nLOGGER WARNING forged\x1b[31m",
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    device_info = await device_info_task
+    assert device_info.name == "evil\r\nLOGGER WARNING forged\x1b[31m"
+    assert client.cached_name == "evilLOGGER WARNING forged[31m"
+    assert "\r" not in client.log_name
+    assert "\n" not in client.log_name
+    assert "\x1b" not in client.log_name
+
+
+async def test_device_info_caps_oversize_name(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """An oversize DeviceInfo.name must be length-capped before storage."""
+    client, _connection, _transport, protocol = api_client
+    device_info_task = asyncio.create_task(client.device_info())
+    await asyncio.sleep(0)
+    response: message.Message = DeviceInfoResponse(name="a" * 4096)
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await device_info_task
+    assert client.cached_name == "a" * MAX_NAME_LEN
+
+
+async def test_bluetooth_gatt_read(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_gatt_read."""
+    client, _connection, _transport, protocol = api_client
+    read_task = asyncio.create_task(client.bluetooth_gatt_read(1234, 1234))
+    await asyncio.sleep(0)
+
+    other_response: message.Message = BluetoothGATTReadResponse(
+        address=1234, handle=4567, data=b"4567"
+    )
+    mock_data_received(protocol, generate_plaintext_packet(other_response))
+
+    response: message.Message = BluetoothGATTReadResponse(
+        address=1234, handle=1234, data=b"1234"
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    assert await read_task == b"1234"
+
+
+async def test_bluetooth_gatt_read_connection_drops(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test connection drop during bluetooth_gatt_read."""
+    client, _connection, _transport, protocol = api_client
+    read_task = asyncio.create_task(client.bluetooth_gatt_read(1234, 1234))
+    await asyncio.sleep(0)
+    response: message.Message = BluetoothDeviceConnectionResponse(
+        address=1234, connected=False, error=13
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    message = (
+        "Peripheral 00:00:00:00:04:D2 changed connection status while waiting"
+        " for BluetoothGATTReadResponse, BluetoothGATTErrorResponse: Invalid attribute length"
+    )
+    with pytest.raises(BluetoothConnectionDroppedError, match=message):
+        await read_task
+
+
+async def test_bluetooth_gatt_read_error(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_gatt_read that errors."""
+    client, _connection, _transport, protocol = api_client
+    read_task = asyncio.create_task(client.bluetooth_gatt_read(1234, 1234))
+    await asyncio.sleep(0)
+    error_response: message.Message = BluetoothGATTErrorResponse(
+        address=1234, handle=1234
+    )
+    mock_data_received(protocol, generate_plaintext_packet(error_response))
+    with pytest.raises(BluetoothGATTAPIError):
+        await read_task
+
+
+async def test_bluetooth_gatt_read_descriptor(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_gatt_read_descriptor."""
+    client, _connection, _transport, protocol = api_client
+    read_task = asyncio.create_task(client.bluetooth_gatt_read_descriptor(1234, 1234))
+    await asyncio.sleep(0)
+
+    other_response: message.Message = BluetoothGATTReadResponse(
+        address=1234, handle=4567, data=b"4567"
+    )
+    mock_data_received(protocol, generate_plaintext_packet(other_response))
+
+    response: message.Message = BluetoothGATTReadResponse(
+        address=1234, handle=1234, data=b"1234"
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    assert await read_task == b"1234"
+
+
+async def test_bluetooth_gatt_write(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_gatt_write."""
+    client, _connection, _transport, protocol = api_client
+    write_task = asyncio.create_task(
+        client.bluetooth_gatt_write(1234, 1234, b"1234", True)
+    )
+    await asyncio.sleep(0)
+
+    other_response: message.Message = BluetoothGATTWriteResponse(
+        address=1234, handle=4567
+    )
+    mock_data_received(protocol, generate_plaintext_packet(other_response))
+
+    response: message.Message = BluetoothGATTWriteResponse(address=1234, handle=1234)
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await write_task
+
+
+async def test_bluetooth_gatt_write_connection_drops(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test connection drop during bluetooth_gatt_read."""
+    client, _connection, _transport, protocol = api_client
+    write_task = asyncio.create_task(
+        client.bluetooth_gatt_write(1234, 1234, b"1234", True)
+    )
+    await asyncio.sleep(0)
+    response: message.Message = BluetoothDeviceConnectionResponse(
+        address=1234, connected=False, error=13
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    message = (
+        "Peripheral 00:00:00:00:04:D2 changed connection status while waiting"
+        " for BluetoothGATTWriteResponse, BluetoothGATTErrorResponse: Invalid attribute length"
+    )
+    with pytest.raises(BluetoothConnectionDroppedError, match=message):
+        await write_task
+
+
+async def test_bluetooth_gatt_write_without_response(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_gatt_write without response."""
+    client, _connection, transport, _protocol = api_client
+    transport.reset_mock()
+    write_task = asyncio.create_task(
+        client.bluetooth_gatt_write(1234, 1234, b"1234", False)
+    )
+    await asyncio.sleep(0)
+    await write_task
+    assert transport.mock_calls[0][1][0] == [
+        b"\x00",
+        b"\x0c",
+        b"K",
+        b'\x08\xd2\t\x10\xd2\t"\x041234',
+    ]
+
+    with pytest.raises(TimeoutAPIError, match="BluetoothGATTWriteResponse"):
+        await client.bluetooth_gatt_write(1234, 1234, b"1234", True, timeout=0)
+
+
+async def test_bluetooth_gatt_write_descriptor(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_gatt_write_descriptor."""
+    client, _connection, _transport, protocol = api_client
+    write_task = asyncio.create_task(
+        client.bluetooth_gatt_write_descriptor(1234, 1234, b"1234", True)
+    )
+    await asyncio.sleep(0)
+
+    other_response: message.Message = BluetoothGATTWriteResponse(
+        address=1234, handle=4567
+    )
+    mock_data_received(protocol, generate_plaintext_packet(other_response))
+
+    response: message.Message = BluetoothGATTWriteResponse(address=1234, handle=1234)
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await write_task
+
+
+async def test_bluetooth_gatt_write_descriptor_without_response(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_gatt_write_descriptor without response."""
+    client, _connection, transport, _protocol = api_client
+    transport.reset_mock()
+    write_task = asyncio.create_task(
+        client.bluetooth_gatt_write_descriptor(
+            1234, 1234, b"1234", wait_for_response=False
+        )
+    )
+    await asyncio.sleep(0)
+    await write_task
+    assert transport.mock_calls[0][1][0] == [
+        b"\x00",
+        b"\x0c",
+        b"M",
+        b"\x08\xd2\t\x10\xd2\t\x1a\x041234",
+    ]
+
+    with pytest.raises(TimeoutAPIError, match="BluetoothGATTWriteResponse"):
+        await client.bluetooth_gatt_write_descriptor(1234, 1234, b"1234", timeout=0)
+
+
+async def test_bluetooth_gatt_get_services_connection_drops(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test connection drop during bluetooth_gatt_get_services."""
+    client, _connection, _transport, protocol = api_client
+    services_task = asyncio.create_task(client.bluetooth_gatt_get_services(1234))
+    await asyncio.sleep(0)
+    response: message.Message = BluetoothDeviceConnectionResponse(
+        address=1234, connected=False, error=13
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    message = (
+        "Peripheral 00:00:00:00:04:D2 changed connection status while waiting"
+        " for BluetoothGATTGetServicesResponse, BluetoothGATTGetServicesDoneResponse, "
+        "BluetoothGATTErrorResponse: Invalid attribute length"
+    )
+    with pytest.raises(BluetoothConnectionDroppedError, match=message):
+        await services_task
+
+
+async def test_bluetooth_gatt_get_services(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_gatt_get_services success case."""
+    client, _connection, _transport, protocol = api_client
+    services_task = asyncio.create_task(client.bluetooth_gatt_get_services(1234))
+    await asyncio.sleep(0)
+    service1: message.Message = BluetoothGATTService(
+        uuid=[1, 1],
+        handle=1,
+        characteristics=[
+            BluetoothGATTCharacteristic(
+                uuid=[1, 2],
+                handle=2,
+                properties=1,
+                descriptors=[BluetoothGATTDescriptor(uuid=[1, 3], handle=3)],
+            )
+        ],
+    )
+    response: message.Message = BluetoothGATTGetServicesResponse(
+        address=1234, services=[service1]
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    done_response: message.Message = BluetoothGATTGetServicesDoneResponse(address=1234)
+    mock_data_received(protocol, generate_plaintext_packet(done_response))
+
+    services = await services_task
+    service = BluetoothGATTServiceModel.from_pb(service1)
+    assert services == ESPHomeBluetoothGATTServices(
+        address=1234,
+        services=[service],
+    )
+
+
+async def test_bluetooth_gatt_get_services_errors(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_gatt_get_services with a failure."""
+    client, _connection, _transport, protocol = api_client
+    services_task = asyncio.create_task(client.bluetooth_gatt_get_services(1234))
+    await asyncio.sleep(0)
+    service1: message.Message = BluetoothGATTService(
+        uuid=[1, 1], handle=1, characteristics=[]
+    )
+    response: message.Message = BluetoothGATTGetServicesResponse(
+        address=1234, services=[service1]
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    done_response: message.Message = BluetoothGATTErrorResponse(address=1234)
+    mock_data_received(protocol, generate_plaintext_packet(done_response))
+
+    with pytest.raises(BluetoothGATTAPIError):
+        await services_task
+
+
+async def test_bluetooth_gatt_start_notify_connection_drops(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test connection drop during bluetooth_gatt_start_notify."""
+    client, _connection, _transport, protocol = api_client
+    notify_task = asyncio.create_task(
+        client.bluetooth_gatt_start_notify(1234, 1, lambda handle, data: None)
+    )
+    await asyncio.sleep(0)
+    response: message.Message = BluetoothDeviceConnectionResponse(
+        address=1234, connected=False, error=13
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    message = (
+        "Peripheral 00:00:00:00:04:D2 changed connection status while waiting"
+        " for BluetoothGATTNotifyResponse, BluetoothGATTErrorResponse: Invalid attribute length"
+    )
+    with pytest.raises(BluetoothConnectionDroppedError, match=message):
+        await notify_task
+
+
+async def test_bluetooth_gatt_start_notify(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_gatt_start_notify."""
+    client, connection, _transport, protocol = api_client
+    notifies = []
+
+    handlers_before = len(list(itertools.chain(*connection._message_handlers.values())))
+
+    def on_bluetooth_gatt_notify(handle: int, data: bytearray) -> None:
+        notifies.append((handle, data))
+
+    notify_task = asyncio.create_task(
+        client.bluetooth_gatt_start_notify(1234, 1, on_bluetooth_gatt_notify)
+    )
+    await asyncio.sleep(0)
+    notify_response: message.Message = BluetoothGATTNotifyResponse(
+        address=1234, handle=1
+    )
+    data_response: message.Message = BluetoothGATTNotifyDataResponse(
+        address=1234, handle=1, data=b"gotit"
+    )
+    mock_data_received(
+        protocol,
+        generate_plaintext_packet(notify_response)
+        + generate_plaintext_packet(data_response),
+    )
+
+    cancel_cb, abort_cb = await notify_task
+    assert notifies == [(1, b"gotit")]
+
+    second_data_response: message.Message = BluetoothGATTNotifyDataResponse(
+        address=1234, handle=1, data=b"after finished"
+    )
+    mock_data_received(protocol, generate_plaintext_packet(second_data_response))
+    assert notifies == [(1, b"gotit"), (1, b"after finished")]
+    await cancel_cb()
+
+    assert (
+        len(list(itertools.chain(*connection._message_handlers.values())))
+        == handlers_before
+    )
+    # Ensure abort callback is a no-op after cancel
+    # and doesn't raise
+    abort_cb()
+    await client.disconnect(force=True)
+    # Ensure abort callback is a no-op after disconnect
+    # and does not raise
+    await cancel_cb()
+
+
+async def test_bluetooth_gatt_start_notify_fails(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_gatt_start_notify failure does not leak."""
+    client, connection, _transport, _protocol = api_client
+    notifies = []
+
+    def on_bluetooth_gatt_notify(handle: int, data: bytearray) -> None:
+        notifies.append((handle, data))
+
+    handlers_before = len(list(itertools.chain(*connection._message_handlers.values())))
+
+    with (
+        patch.object(
+            connection,
+            "send_messages_await_response_complex",
+            side_effect=APIConnectionError,
+        ),
+        pytest.raises(APIConnectionError),
+    ):
+        await client.bluetooth_gatt_start_notify(1234, 1, on_bluetooth_gatt_notify)
+
+    assert (
+        len(list(itertools.chain(*connection._message_handlers.values())))
+        == handlers_before
+    )
+
+
+async def test_bluetooth_gatt_notify_callback_raises(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test that exceptions in bluetooth gatt notify callbacks are caught."""
+    client, connection, _transport, protocol = api_client
+
+    def on_bluetooth_gatt_notify(handle: int, data: bytearray) -> None:
+        msg = "Test exception in notify callback"
+        raise ValueError(msg)
+
+    notify_task = asyncio.create_task(
+        client.bluetooth_gatt_start_notify(1234, 1, on_bluetooth_gatt_notify)
+    )
+    await asyncio.sleep(0)
+    notify_response: message.Message = BluetoothGATTNotifyResponse(
+        address=1234, handle=1
+    )
+    mock_data_received(protocol, generate_plaintext_packet(notify_response))
+    await notify_task
+
+    # Clear any logs from the notify setup
+    caplog.clear()
+
+    # Send data that will trigger the exception
+    data_response: message.Message = BluetoothGATTNotifyDataResponse(
+        address=1234, handle=1, data=b"test_data"
+    )
+    mock_data_received(protocol, generate_plaintext_packet(data_response))
+    await asyncio.sleep(0)
+
+    # Verify the exception was caught and logged
+    assert "Unexpected error in message handler" in caplog.text
+    assert "ValueError: Test exception in notify callback" in caplog.text
+    assert "BluetoothGATTNotifyDataResponse" in caplog.text
+
+    # Verify the connection is still alive
+    assert connection.is_connected
+
+
+async def test_bluetooth_gatt_stop_notify(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_gatt_stop_notify stops notify and removes callback."""
+    client, connection, _transport, protocol = api_client
+    notifies = []
+
+    handlers_before = len(list(itertools.chain(*connection._message_handlers.values())))
+
+    def on_bluetooth_gatt_notify(handle: int, data: bytearray) -> None:
+        notifies.append((handle, data))
+
+    notify_task = asyncio.create_task(
+        client.bluetooth_gatt_start_notify(1234, 1, on_bluetooth_gatt_notify)
+    )
+    await asyncio.sleep(0)
+    notify_response: message.Message = BluetoothGATTNotifyResponse(
+        address=1234, handle=1
+    )
+    mock_data_received(protocol, generate_plaintext_packet(notify_response))
+
+    await notify_task
+
+    # Verify the callback is registered
+    assert (1234, 1) in client._notify_callbacks
+
+    # Stop notify using the sync method
+    client.bluetooth_gatt_stop_notify(1234, 1)
+
+    # Verify callback is removed
+    assert (1234, 1) not in client._notify_callbacks
+
+    # Verify handlers are cleaned up
+    assert (
+        len(list(itertools.chain(*connection._message_handlers.values())))
+        == handlers_before
+    )
+
+
+async def test_bluetooth_gatt_start_notify_abort_callback_cleans_up(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test that the abort callback (second return value) cleans up _notify_callbacks."""
+    client, connection, _transport, protocol = api_client
+
+    handlers_before = len(list(itertools.chain(*connection._message_handlers.values())))
+
+    def on_bluetooth_gatt_notify(handle: int, data: bytearray) -> None:
+        pass
+
+    notify_task = asyncio.create_task(
+        client.bluetooth_gatt_start_notify(1234, 1, on_bluetooth_gatt_notify)
+    )
+    await asyncio.sleep(0)
+    mock_data_received(
+        protocol,
+        generate_plaintext_packet(BluetoothGATTNotifyResponse(address=1234, handle=1)),
+    )
+
+    _cancel_cb, abort_cb = await notify_task
+
+    # Verify the callback is registered
+    assert (1234, 1) in client._notify_callbacks
+
+    # Call abort callback directly (simulates connection lost scenario)
+    abort_cb()
+
+    # Verify _notify_callbacks is cleaned up
+    assert (1234, 1) not in client._notify_callbacks
+
+    # Verify handlers are cleaned up
+    assert (
+        len(list(itertools.chain(*connection._message_handlers.values())))
+        == handlers_before
+    )
+
+
+async def test_bluetooth_gatt_stop_notify_for_address(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_gatt_stop_notify_for_address stops all notifies for an address."""
+    client, connection, _transport, protocol = api_client
+
+    handlers_before = len(list(itertools.chain(*connection._message_handlers.values())))
+
+    def on_bluetooth_gatt_notify(handle: int, data: bytearray) -> None:
+        pass
+
+    # Start multiple notifies for the same address
+    notify_task1 = asyncio.create_task(
+        client.bluetooth_gatt_start_notify(1234, 1, on_bluetooth_gatt_notify)
+    )
+    await asyncio.sleep(0)
+    mock_data_received(
+        protocol,
+        generate_plaintext_packet(BluetoothGATTNotifyResponse(address=1234, handle=1)),
+    )
+    await notify_task1
+
+    notify_task2 = asyncio.create_task(
+        client.bluetooth_gatt_start_notify(1234, 2, on_bluetooth_gatt_notify)
+    )
+    await asyncio.sleep(0)
+    mock_data_received(
+        protocol,
+        generate_plaintext_packet(BluetoothGATTNotifyResponse(address=1234, handle=2)),
+    )
+    await notify_task2
+
+    # Also start a notify for a different address
+    notify_task3 = asyncio.create_task(
+        client.bluetooth_gatt_start_notify(5678, 1, on_bluetooth_gatt_notify)
+    )
+    await asyncio.sleep(0)
+    mock_data_received(
+        protocol,
+        generate_plaintext_packet(BluetoothGATTNotifyResponse(address=5678, handle=1)),
+    )
+    await notify_task3
+
+    # Verify all callbacks are registered
+    assert (1234, 1) in client._notify_callbacks
+    assert (1234, 2) in client._notify_callbacks
+    assert (5678, 1) in client._notify_callbacks
+
+    # Stop all notifies for address 1234
+    client.bluetooth_gatt_stop_notify_for_address(1234)
+
+    # Verify callbacks for 1234 are removed but 5678 remains
+    assert (1234, 1) not in client._notify_callbacks
+    assert (1234, 2) not in client._notify_callbacks
+    assert (5678, 1) in client._notify_callbacks
+
+    # Clean up
+    client.bluetooth_gatt_stop_notify(5678, 1)
+
+    # Verify all handlers are cleaned up
+    assert (
+        len(list(itertools.chain(*connection._message_handlers.values())))
+        == handlers_before
+    )
+
+
+async def test_bluetooth_device_connect_cleans_up_notify_on_disconnect(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test that notify callbacks are cleaned up when device disconnects."""
+    client, _connection, _transport, protocol = api_client
+
+    def on_bluetooth_gatt_notify(handle: int, data: bytearray) -> None:
+        pass
+
+    # Start a notify
+    notify_task = asyncio.create_task(
+        client.bluetooth_gatt_start_notify(1234, 1, on_bluetooth_gatt_notify)
+    )
+    await asyncio.sleep(0)
+    mock_data_received(
+        protocol,
+        generate_plaintext_packet(BluetoothGATTNotifyResponse(address=1234, handle=1)),
+    )
+    await notify_task
+
+    # Verify the callback is registered
+    assert (1234, 1) in client._notify_callbacks
+
+    # Simulate device connecting (sets up the disconnect handler)
+    connection_states = []
+
+    def on_bluetooth_connection_state(connected: bool, mtu: int, error: int) -> None:
+        connection_states.append((connected, mtu, error))
+
+    connect_task = asyncio.create_task(
+        client.bluetooth_device_connect(
+            1234,
+            on_bluetooth_connection_state,
+            feature_flags=BluetoothProxyFeature.REMOTE_CACHING,
+            address_type=0,
+        )
+    )
+    await asyncio.sleep(0)
+
+    # Send connection response
+    mock_data_received(
+        protocol,
+        generate_plaintext_packet(
+            BluetoothDeviceConnectionResponse(address=1234, connected=True, mtu=500)
+        ),
+    )
+    cancel = await connect_task
+
+    # Verify connected state was received
+    assert connection_states == [(True, 500, 0)]
+
+    # Now simulate disconnect
+    mock_data_received(
+        protocol,
+        generate_plaintext_packet(
+            BluetoothDeviceConnectionResponse(address=1234, connected=False, error=0)
+        ),
+    )
+    await asyncio.sleep(0)
+
+    # Verify disconnect state was received
+    assert connection_states == [(True, 500, 0), (False, 0, 0)]
+
+    # Verify notify callback was cleaned up
+    assert (1234, 1) not in client._notify_callbacks
+
+    # Clean up
+    cancel()
+
+
+async def test_subscribe_bluetooth_le_advertisements(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test subscribe_bluetooth_le_advertisements."""
+    client, _connection, _transport, protocol = api_client
+    advs = []
+
+    def on_bluetooth_le_advertisements(adv: BluetoothLEAdvertisement) -> None:
+        advs.append(adv)
+
+    unsub = client.subscribe_bluetooth_le_advertisements(on_bluetooth_le_advertisements)
+    await asyncio.sleep(0)
+    response: message.Message = BluetoothLEAdvertisementResponse(
+        address=1234,
+        name=b"mydevice",
+        rssi=-50,
+        service_uuids=["1234"],
+        service_data=[
+            BluetoothServiceData(
+                uuid="1234",
+                data=b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+            )
+        ],
+        manufacturer_data=[
+            BluetoothServiceData(
+                uuid="1234",
+                data=b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+            )
+        ],
+        address_type=1,
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+
+    assert advs == [
+        BluetoothLEAdvertisement(
+            address=1234,
+            name="mydevice",
+            rssi=-50,
+            service_uuids=["000034-0000-1000-8000-00805f9b34fb"],
+            manufacturer_data={
+                4660: b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+            },
+            service_data={
+                "000034-0000-1000-8000-00805f9b34fb": b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+            },
+            address_type=1,
+        )
+    ]
+    advs.clear()
+    response: message.Message = BluetoothLEAdvertisementResponse(
+        address=1234,
+        name=b"mydevice",
+        rssi=-50,
+        service_uuids=[],
+        service_data=[],
+        manufacturer_data=[],
+        address_type=1,
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+
+    assert advs == [
+        BluetoothLEAdvertisement(
+            address=1234,
+            name="mydevice",
+            rssi=-50,
+            service_uuids=[],
+            manufacturer_data={},
+            service_data={},
+            address_type=1,
+        )
+    ]
+    advs.clear()
+    response: message.Message = BluetoothLEAdvertisementResponse(
+        address=1234,
+        name=b"mydevice",
+        rssi=-50,
+        service_uuids=["1234"],
+        service_data=[
+            BluetoothServiceData(
+                uuid="1234",
+                legacy_data=b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+            )
+        ],
+        manufacturer_data=[
+            BluetoothServiceData(
+                uuid="1234",
+                legacy_data=b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+            )
+        ],
+        address_type=1,
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+
+    assert advs == [
+        BluetoothLEAdvertisement(
+            address=1234,
+            name="mydevice",
+            rssi=-50,
+            service_uuids=["000034-0000-1000-8000-00805f9b34fb"],
+            manufacturer_data={
+                4660: b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+            },
+            service_data={
+                "000034-0000-1000-8000-00805f9b34fb": b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+            },
+            address_type=1,
+        )
+    ]
+    unsub()
+
+
+async def test_subscribe_bluetooth_le_raw_advertisements(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test subscribe_bluetooth_le_raw_advertisements."""
+    client, _connection, _transport, protocol = api_client
+    adv_groups = []
+
+    def on_raw_bluetooth_le_advertisements(
+        advs: BluetoothLERawAdvertisementsResponse,
+    ) -> None:
+        adv_groups.append(advs.advertisements)
+
+    unsub = client.subscribe_bluetooth_le_raw_advertisements(
+        on_raw_bluetooth_le_advertisements
+    )
+    await asyncio.sleep(0)
+
+    response: message.Message = BluetoothLERawAdvertisementsResponse(
+        advertisements=[
+            BluetoothLERawAdvertisement(
+                address=1234,
+                rssi=-50,
+                address_type=1,
+                data=b"1234",
+            )
+        ]
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    assert len(adv_groups) == 1
+    first_adv = adv_groups[0][0]
+    assert first_adv.address == 1234
+    assert first_adv.rssi == -50
+    assert first_adv.address_type == 1
+    assert first_adv.data == b"1234"
+    unsub()
+
+
+async def test_subscribe_bluetooth_connections_free(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test subscribe_bluetooth_connections_free."""
+    client, _connection, _transport, protocol = api_client
+    connections = []
+
+    def on_bluetooth_connections_free(
+        free: int, limit: int, allocated: list[int]
+    ) -> None:
+        connections.append((free, limit, allocated))
+
+    unsub = client.subscribe_bluetooth_connections_free(on_bluetooth_connections_free)
+    await asyncio.sleep(0)
+    response: message.Message = BluetoothConnectionsFreeResponse(
+        free=2, limit=3, allocated=[1234, 5678]
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+
+    assert connections == [(2, 3, [1234, 5678])]
+    unsub()
+
+
+async def test_subscribe_home_assistant_states(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test subscribe_home_assistant_states."""
+    client, _connection, _transport, protocol = api_client
+    states = []
+    requests = []
+
+    def on_subscribe_home_assistant_states(
+        entity_id: str, attribute: str | None
+    ) -> None:
+        states.append((entity_id, attribute))
+
+    def on_request_home_assistant_state(entity_id: str, attribute: str | None) -> None:
+        requests.append((entity_id, attribute))
+
+    client.subscribe_home_assistant_states(
+        on_subscribe_home_assistant_states,
+        on_request_home_assistant_state,
+    )
+
+    await asyncio.sleep(0)
+
+    response: message.Message = SubscribeHomeAssistantStateResponse(
+        entity_id="sensor.red", attribute="any"
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+
+    response: message.Message = SubscribeHomeAssistantStateResponse(
+        entity_id="sensor.green"
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+
+    response: message.Message = SubscribeHomeAssistantStateResponse(
+        entity_id="sensor.blue", attribute="any", once=True
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+
+    response: message.Message = SubscribeHomeAssistantStateResponse(
+        entity_id="sensor.white", once=True
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+
+    assert states == [("sensor.red", "any"), ("sensor.green", "")]
+    assert requests == [("sensor.blue", "any"), ("sensor.white", "")]
+
+
+async def test_subscribe_logs(auth_client: APIClient) -> None:
+    send = patch_response_callback(auth_client)
+    on_logs = MagicMock()
+    cancel = auth_client.subscribe_logs(on_logs)
+    log_msg = SubscribeLogsResponse(level=1, message=b"asdf")
+    await send(log_msg)
+    on_logs.assert_called_with(log_msg)
+    on_logs.reset_mock()
+    cancel()
+    log_msg = SubscribeLogsResponse(level=1, message=b"asdf")
+    await send(log_msg)
+    on_logs.assert_not_called()
+    on_logs.reset_mock()
+
+
+@pytest.mark.asyncio
+async def test_subscribe_home_assistant_states_and_services(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test subscribe_home_assistant_states_and_services."""
+    client, connection, _transport, protocol = api_client
+
+    # Patch send_messages to verify it's called with all 3 messages
+    send_messages = connection.send_messages = MagicMock()
+
+    # Mock callbacks
+    on_state = MagicMock()
+    on_service_call = MagicMock()
+    on_state_sub = MagicMock()
+    on_state_request = MagicMock()
+
+    # Call the unified subscription method
+    client.subscribe_home_assistant_states_and_services(
+        on_state=on_state,
+        on_service_call=on_service_call,
+        on_state_sub=on_state_sub,
+        on_state_request=on_state_request,
+    )
+
+    # Verify that all three subscription messages were sent in a single call
+    assert send_messages.call_count == 1
+    sent_messages = send_messages.call_args[0][0]
+    assert len(sent_messages) == 3
+    assert isinstance(sent_messages[0], SubscribeStatesRequest)
+    assert isinstance(sent_messages[1], SubscribeHomeassistantServicesRequest)
+    assert isinstance(sent_messages[2], SubscribeHomeAssistantStatesRequest)
+
+    # Test that callbacks work correctly
+    # Test state update
+    await asyncio.sleep(0)
+    response: message.Message = BinarySensorStateResponse(key=1, state=True)
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    on_state.assert_called_once()
+
+    # Test service call
+    on_state.reset_mock()
+    service_msg = HomeassistantActionRequest(service="test_service")
+    mock_data_received(protocol, generate_plaintext_packet(service_msg))
+    on_service_call.assert_called_once()
+
+    # Test home assistant state subscription
+    on_service_call.reset_mock()
+    ha_state_msg = SubscribeHomeAssistantStateResponse(
+        entity_id="sensor.test", attribute="value"
+    )
+    mock_data_received(protocol, generate_plaintext_packet(ha_state_msg))
+    on_state_sub.assert_called_once_with("sensor.test", "value")
+
+
+async def test_send_home_assistant_state(auth_client: APIClient) -> None:
+    send = patch_send(auth_client)
+    auth_client.send_home_assistant_state("binary_sensor.bla", None, "on")
+    send.assert_called_once_with(
+        HomeAssistantStateResponse(
+            entity_id="binary_sensor.bla", state="on", attribute=None
+        )
+    )
+
+
+async def test_subscribe_zwave_proxy_request(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test subscribe_zwave_proxy_request."""
+    client, _connection, _transport, protocol = api_client
+    test_msg = []
+
+    def on_zwave_proxy_request(msg: ZWaveProxyRequest) -> None:
+        test_msg.append(msg)
+
+    client.subscribe_zwave_proxy_request(on_zwave_proxy_request)
+    await asyncio.sleep(0)
+    response: message.Message = ZWaveProxyRequestPb(type=2, data=b"\x00\x01\x02\x03")
+    mock_data_received(protocol, generate_plaintext_packet(response))
+
+    assert len(test_msg) == 1
+    first_msg = test_msg[0]
+    assert first_msg.type == 2
+    assert first_msg.data == b"\x00\x01\x02\x03"
+
+
+async def test_subscribe_infrared_rf_receive(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test subscribe_infrared_rf_receive."""
+    client, _connection, _transport, protocol = api_client
+    test_msg = []
+
+    def on_infrared_rf_receive(msg: InfraredRFReceiveEvent) -> None:
+        test_msg.append(msg)
+
+    client.subscribe_infrared_rf_receive(on_infrared_rf_receive)
+    await asyncio.sleep(0)
+    response: message.Message = InfraredRFReceiveEventPb(
+        key=123, device_id=5, timings=[9000, -4500, 560, -560, 560, -1690]
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+
+    assert len(test_msg) == 1
+    first_msg = test_msg[0]
+    assert first_msg.key == 123
+    assert first_msg.device_id == 5
+    assert first_msg.timings == [9000, -4500, 560, -560, 560, -1690]
+
+
+async def test_infrared_rf_transmit_raw_timings(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test infrared_rf_transmit_raw_timings."""
+    client, connection, _transport, _protocol = api_client
+    sent_messages: list[InfraredRFTransmitRawTimingsRequestPb] = []
+
+    # Capture sent messages
+    original_send = connection.send_message
+
+    def capture_send(msg: Any) -> None:
+        if isinstance(msg, InfraredRFTransmitRawTimingsRequestPb):
+            sent_messages.append(msg)
+        original_send(msg)
+
+    connection.send_message = capture_send
+
+    # Send raw timings transmit request with repeat_count
+    timings = [9000, 4500, 560, 560, 560, 1690, 560, 560]
+    client.infrared_rf_transmit_raw_timings(
+        key=999, carrier_frequency=38000, timings=timings, repeat_count=3, device_id=7
+    )
+
+    # Verify the message was sent
+    assert len(sent_messages) == 1
+    sent_msg = sent_messages[0]
+    assert sent_msg.key == 999
+    assert sent_msg.device_id == 7
+    assert sent_msg.carrier_frequency == 38000
+    assert sent_msg.repeat_count == 3
+    assert list(sent_msg.timings) == timings
+
+
+async def test_radio_frequency_transmit_raw_timings(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test radio_frequency_transmit_raw_timings sends the correct request."""
+    client, connection, _transport, _protocol = api_client
+    sent_messages: list[InfraredRFTransmitRawTimingsRequestPb] = []
+
+    original_send = connection.send_message
+
+    def capture_send(msg: Any) -> None:
+        if isinstance(msg, InfraredRFTransmitRawTimingsRequestPb):
+            sent_messages.append(msg)
+        original_send(msg)
+
+    connection.send_message = capture_send
+
+    timings = [500, -500, 1000, -1000, 500, -500]
+    client.radio_frequency_transmit_raw_timings(
+        key=111,
+        frequency=433920000,
+        timings=timings,
+        modulation=RadioFrequencyModulation.OOK,
+        repeat_count=2,
+        device_id=3,
+    )
+
+    assert len(sent_messages) == 1
+    sent_msg = sent_messages[0]
+    assert sent_msg.key == 111
+    assert sent_msg.device_id == 3
+    assert sent_msg.carrier_frequency == 433920000
+    assert sent_msg.modulation == RadioFrequencyModulation.OOK
+    assert sent_msg.repeat_count == 2
+    assert list(sent_msg.timings) == timings
+
+
+# ==================== SERIAL PROXY ====================
+
+
+async def test_serial_proxy_configure(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test serial_proxy_configure sends the correct request."""
+    client, connection, _transport, _protocol = api_client
+    sent_messages: list[SerialProxyConfigureRequestPb] = []
+
+    original_send = connection.send_message
+
+    def capture_send(msg: Any) -> None:
+        if isinstance(msg, SerialProxyConfigureRequestPb):
+            sent_messages.append(msg)
+        original_send(msg)
+
+    connection.send_message = capture_send
+
+    client.serial_proxy_configure(
+        instance=1,
+        baudrate=115200,
+        flow_control=True,
+        parity=SerialProxyParity.EVEN,
+        stop_bits=2,
+        data_size=7,
+    )
+
+    assert len(sent_messages) == 1
+    sent_msg = sent_messages[0]
+    assert sent_msg.instance == 1
+    assert sent_msg.baudrate == 115200
+    assert sent_msg.flow_control is True
+    assert sent_msg.parity == 1  # EVEN
+    assert sent_msg.stop_bits == 2
+    assert sent_msg.data_size == 7
+
+
+async def test_serial_proxy_configure_defaults(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test serial_proxy_configure with default parameters."""
+    client, connection, _transport, _protocol = api_client
+    sent_messages: list[SerialProxyConfigureRequestPb] = []
+
+    original_send = connection.send_message
+
+    def capture_send(msg: Any) -> None:
+        if isinstance(msg, SerialProxyConfigureRequestPb):
+            sent_messages.append(msg)
+        original_send(msg)
+
+    connection.send_message = capture_send
+
+    client.serial_proxy_configure(instance=0, baudrate=9600)
+
+    assert len(sent_messages) == 1
+    sent_msg = sent_messages[0]
+    assert sent_msg.instance == 0
+    assert sent_msg.baudrate == 9600
+    assert sent_msg.flow_control is False
+    assert sent_msg.parity == 0  # NONE
+    assert sent_msg.stop_bits == 1
+    assert sent_msg.data_size == 8
+
+
+async def test_serial_proxy_configure_invalid_stop_bits(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test serial_proxy_configure raises ValueError for invalid stop_bits."""
+    client, _connection, _transport, _protocol = api_client
+    with pytest.raises(ValueError, match="stop_bits"):
+        client.serial_proxy_configure(instance=0, baudrate=9600, stop_bits=3)
+
+
+async def test_serial_proxy_configure_invalid_data_size(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test serial_proxy_configure raises ValueError for invalid data_size."""
+    client, _connection, _transport, _protocol = api_client
+    with pytest.raises(ValueError, match="data_size"):
+        client.serial_proxy_configure(instance=0, baudrate=9600, data_size=9)
+
+
+async def test_serial_proxy_write(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test serial_proxy_write sends data to the device."""
+    client, connection, _transport, _protocol = api_client
+    sent_messages: list[SerialProxyWriteRequestPb] = []
+
+    original_send = connection.send_message
+
+    def capture_send(msg: Any) -> None:
+        if isinstance(msg, SerialProxyWriteRequestPb):
+            sent_messages.append(msg)
+        original_send(msg)
+
+    connection.send_message = capture_send
+
+    client.serial_proxy_write(instance=0, data=b"AT\r\n")
+
+    assert len(sent_messages) == 1
+    sent_msg = sent_messages[0]
+    assert sent_msg.instance == 0
+    assert sent_msg.data == b"AT\r\n"
+
+
+async def test_serial_proxy_write_empty(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test serial_proxy_write with empty data."""
+    client, connection, _transport, _protocol = api_client
+    sent_messages: list[SerialProxyWriteRequestPb] = []
+
+    original_send = connection.send_message
+
+    def capture_send(msg: Any) -> None:
+        if isinstance(msg, SerialProxyWriteRequestPb):
+            sent_messages.append(msg)
+        original_send(msg)
+
+    connection.send_message = capture_send
+
+    client.serial_proxy_write(instance=2, data=b"")
+
+    assert len(sent_messages) == 1
+    sent_msg = sent_messages[0]
+    assert sent_msg.instance == 2
+    assert sent_msg.data == b""
+
+
+async def test_subscribe_serial_proxy_data(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test subscribe_serial_proxy_data receives data from device."""
+    client, _connection, _transport, protocol = api_client
+    test_msg: list[SerialProxyDataReceived] = []
+
+    def on_data(msg: SerialProxyDataReceived) -> None:
+        test_msg.append(msg)
+
+    client.subscribe_serial_proxy_data(on_data)
+    await asyncio.sleep(0)
+
+    response: message.Message = SerialProxyDataReceivedPb(
+        instance=0, data=b"\x48\x65\x6c\x6c\x6f"
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+
+    assert len(test_msg) == 1
+    first_msg = test_msg[0]
+    assert first_msg.instance == 0
+    assert first_msg.data == b"\x48\x65\x6c\x6c\x6f"
+
+
+async def test_subscribe_serial_proxy_data_multiple(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test subscribe_serial_proxy_data receives multiple messages."""
+    client, _connection, _transport, protocol = api_client
+    test_msg: list[SerialProxyDataReceived] = []
+
+    def on_data(msg: SerialProxyDataReceived) -> None:
+        test_msg.append(msg)
+
+    client.subscribe_serial_proxy_data(on_data)
+    await asyncio.sleep(0)
+
+    # Send data from instance 0
+    response1: message.Message = SerialProxyDataReceivedPb(instance=0, data=b"first")
+    mock_data_received(protocol, generate_plaintext_packet(response1))
+
+    # Send data from instance 1
+    response2: message.Message = SerialProxyDataReceivedPb(instance=1, data=b"second")
+    mock_data_received(protocol, generate_plaintext_packet(response2))
+
+    assert len(test_msg) == 2
+    assert test_msg[0].instance == 0
+    assert test_msg[0].data == b"first"
+    assert test_msg[1].instance == 1
+    assert test_msg[1].data == b"second"
+
+
+async def test_subscribe_serial_proxy_data_unsub(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test unsubscribing from serial proxy data."""
+    client, _connection, _transport, protocol = api_client
+    test_msg: list[SerialProxyDataReceived] = []
+
+    def on_data(msg: SerialProxyDataReceived) -> None:
+        test_msg.append(msg)
+
+    unsub = client.subscribe_serial_proxy_data(on_data)
+    await asyncio.sleep(0)
+
+    # Should receive this
+    response1: message.Message = SerialProxyDataReceivedPb(instance=0, data=b"before")
+    mock_data_received(protocol, generate_plaintext_packet(response1))
+    assert len(test_msg) == 1
+
+    # Unsubscribe
+    unsub()
+
+    # Should NOT receive this
+    response2: message.Message = SerialProxyDataReceivedPb(instance=0, data=b"after")
+    mock_data_received(protocol, generate_plaintext_packet(response2))
+    assert len(test_msg) == 1
+
+
+async def test_serial_proxy_set_modem_pins(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test serial_proxy_set_modem_pins sends the correct request."""
+    client, connection, _transport, _protocol = api_client
+    sent_messages: list[SerialProxySetModemPinsRequestPb] = []
+
+    original_send = connection.send_message
+
+    def capture_send(msg: Any) -> None:
+        if isinstance(msg, SerialProxySetModemPinsRequestPb):
+            sent_messages.append(msg)
+        original_send(msg)
+
+    connection.send_message = capture_send
+
+    client.serial_proxy_set_modem_pins(instance=0, line_states=1)
+
+    assert len(sent_messages) == 1
+    sent_msg = sent_messages[0]
+    assert sent_msg.instance == 0
+    assert sent_msg.line_states == 1
+
+
+async def test_serial_proxy_get_modem_pins(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test serial_proxy_get_modem_pins returns modem pin states."""
+    client, connection, _transport, _protocol = api_client
+
+    response_pb = SerialProxyGetModemPinsResponsePb(instance=0, line_states=1)
+
+    async def mock_send_complex(messages, app, stop, msg_types, timeout=10.0):
+        assert len(messages) == 1
+        assert isinstance(messages[0], SerialProxyGetModemPinsRequestPb)
+        assert messages[0].instance == 0
+        return [response_pb]
+
+    connection.send_messages_await_response_complex = mock_send_complex
+
+    result = await client.serial_proxy_get_modem_pins(instance=0)
+
+    assert isinstance(result, SerialProxyModemPins)
+    assert result.instance == 0
+    assert result.line_states == 1
+
+
+async def test_serial_proxy_get_modem_pins_matches_instance(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test that serial_proxy_get_modem_pins filters responses by instance.
+
+    A response for a different instance must be ignored so that an in-flight
+    request for a specific instance does not pick up an unrelated response.
+    """
+    client, _connection, _transport, protocol = api_client
+    task = asyncio.create_task(client.serial_proxy_get_modem_pins(instance=1))
+    await asyncio.sleep(0)
+
+    # Send a response for a different instance; it must not satisfy the
+    # request.
+    other_instance_response: message.Message = SerialProxyGetModemPinsResponsePb(
+        instance=0, line_states=7
+    )
+    mock_data_received(protocol, generate_plaintext_packet(other_instance_response))
+    await asyncio.sleep(0)
+    assert not task.done()
+
+    # Now send the response for the requested instance.
+    matching_response: message.Message = SerialProxyGetModemPinsResponsePb(
+        instance=1, line_states=3
+    )
+    mock_data_received(protocol, generate_plaintext_packet(matching_response))
+    result = await task
+
+    assert isinstance(result, SerialProxyModemPins)
+    assert result.instance == 1
+    assert result.line_states == 3
+
+
+async def test_serial_proxy_get_modem_pins_timeout(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test serial_proxy_get_modem_pins propagates TimeoutAPIError."""
+    client, connection, _transport, _protocol = api_client
+
+    async def mock_send_complex(messages, app, stop, msg_types, timeout=10.0):
+        raise TimeoutAPIError
+
+    connection.send_messages_await_response_complex = mock_send_complex
+
+    with pytest.raises(TimeoutAPIError):
+        await client.serial_proxy_get_modem_pins(instance=0)
+
+
+async def test_serial_proxy_flush(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test serial_proxy_flush sends the correct request and returns the response."""
+    client, connection, _transport, _protocol = api_client
+
+    response_pb = SerialProxyRequestResponsePb(
+        instance=1,
+        type=SerialProxyRequestType.FLUSH,
+        status=SerialProxyStatus.OK,
+    )
+
+    async def mock_send_complex(messages, do_append, stop, msg_types, timeout=10.0):
+        assert len(messages) == 1
+        assert isinstance(messages[0], SerialProxyRequestPb)
+        assert messages[0].instance == 1
+        assert messages[0].type == SerialProxyRequestType.FLUSH
+        # Verify predicate matches correct instance and type
+        assert do_append(response_pb) is True
+        assert stop(response_pb) is True
+        # Verify predicate rejects wrong instance
+        wrong_instance = SerialProxyRequestResponsePb(
+            instance=2,
+            type=SerialProxyRequestType.FLUSH,
+            status=SerialProxyStatus.OK,
+        )
+        assert do_append(wrong_instance) is False
+        assert stop(wrong_instance) is False
+        # Verify predicate rejects wrong type
+        wrong_type = SerialProxyRequestResponsePb(
+            instance=1,
+            type=SerialProxyRequestType.SUBSCRIBE,
+            status=SerialProxyStatus.OK,
+        )
+        assert do_append(wrong_type) is False
+        assert stop(wrong_type) is False
+        return [response_pb]
+
+    connection.send_messages_await_response_complex = mock_send_complex
+
+    result = await client.serial_proxy_flush(instance=1)
+
+    assert isinstance(result, SerialProxyRequestResponse)
+    assert result.instance == 1
+    assert result.type == SerialProxyRequestType.FLUSH
+    assert result.status == SerialProxyStatus.OK
+
+
+@pytest.mark.parametrize(
+    ("method", "request_type", "instance"),
+    [
+        (APIClient.serial_proxy_subscribe, SerialProxyRequestType.SUBSCRIBE, 2),
+        (APIClient.serial_proxy_unsubscribe, SerialProxyRequestType.UNSUBSCRIBE, 3),
+    ],
+)
+async def test_serial_proxy_request_send(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+    method: Callable[..., None],
+    request_type: SerialProxyRequestType,
+    instance: int,
+) -> None:
+    """Test serial_proxy subscribe/unsubscribe sends the correct request."""
+    client, connection, _transport, _protocol = api_client
+    sent_messages: list[SerialProxyRequestPb] = []
+
+    original_send = connection.send_message
+
+    def capture_send(msg: Any) -> None:
+        if isinstance(msg, SerialProxyRequestPb):
+            sent_messages.append(msg)
+        original_send(msg)
+
+    connection.send_message = capture_send
+
+    method(client, instance=instance)
+
+    assert len(sent_messages) == 1
+    assert sent_messages[0].instance == instance
+    assert sent_messages[0].type == request_type
+
+
+@pytest.mark.parametrize(
+    ("method", "request_type", "instance", "wrong_instance"),
+    [
+        (
+            APIClient.serial_proxy_subscribe_await_response,
+            SerialProxyRequestType.SUBSCRIBE,
+            2,
+            9,
+        ),
+        (
+            APIClient.serial_proxy_unsubscribe_await_response,
+            SerialProxyRequestType.UNSUBSCRIBE,
+            3,
+            1,
+        ),
+    ],
+)
+async def test_serial_proxy_request_await_response(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+    method: Callable[..., Coroutine[Any, Any, SerialProxyRequestResponse]],
+    request_type: SerialProxyRequestType,
+    instance: int,
+    wrong_instance: int,
+) -> None:
+    """Test awaitable serial_proxy subscribe/unsubscribe returns matching response."""
+    client, connection, _transport, _protocol = api_client
+
+    response_pb = SerialProxyRequestResponsePb(
+        instance=instance,
+        type=request_type,
+        status=SerialProxyStatus.OK,
+    )
+
+    async def mock_send_complex(messages, do_append, stop, msg_types, timeout=10.0):
+        assert len(messages) == 1
+        assert isinstance(messages[0], SerialProxyRequestPb)
+        assert messages[0].instance == instance
+        assert messages[0].type == request_type
+        assert do_append(response_pb) is True
+        assert stop(response_pb) is True
+        mismatched_instance = SerialProxyRequestResponsePb(
+            instance=wrong_instance,
+            type=request_type,
+            status=SerialProxyStatus.OK,
+        )
+        assert do_append(mismatched_instance) is False
+        assert stop(mismatched_instance) is False
+        mismatched_type = SerialProxyRequestResponsePb(
+            instance=instance,
+            type=(
+                SerialProxyRequestType.UNSUBSCRIBE
+                if request_type == SerialProxyRequestType.SUBSCRIBE
+                else SerialProxyRequestType.SUBSCRIBE
+            ),
+            status=SerialProxyStatus.OK,
+        )
+        assert do_append(mismatched_type) is False
+        assert stop(mismatched_type) is False
+        return [response_pb]
+
+    connection.send_messages_await_response_complex = mock_send_complex
+
+    result = await method(client, instance=instance)
+
+    assert isinstance(result, SerialProxyRequestResponse)
+    assert result.instance == instance
+    assert result.type == request_type
+    assert result.status == SerialProxyStatus.OK
+
+
+async def test_execute_service_with_response(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test execute_service with return_response returns response directly."""
+    client, connection, _transport, protocol = api_client
+    patch_api_version(client, APIVersion(1, 3))
+    sent_requests: list[ExecuteServiceRequest] = []
+
+    # Capture sent requests to get auto-generated call_id
+    original_send = connection.send_message
+
+    def capture_send(msg: Any) -> None:
+        if isinstance(msg, ExecuteServiceRequest):
+            sent_requests.append(msg)
+        original_send(msg)
+
+    connection.send_message = capture_send
+
+    service = UserService(
+        name="my_service",
+        key=1,
+        args=[
+            UserServiceArg(name="arg1", type=UserServiceArgType.BOOL),
+        ],
+    )
+
+    # Execute service with return_response - start as task so we can simulate response
+    task = asyncio.create_task(
+        client.execute_service(
+            service,
+            data={"arg1": True},
+            return_response=True,
+        )
+    )
+    await asyncio.sleep(0)  # Let task start and send request
+
+    # Get the auto-generated call_id
+    assert len(sent_requests) == 1
+    first_call_id = sent_requests[0].call_id
+    assert first_call_id != 0  # Should be auto-generated
+
+    # Simulate response from device
+    response: message.Message = ExecuteServiceResponsePb(
+        call_id=first_call_id,
+        success=True,
+        error_message="",
+        response_data=b'{"result": "ok"}',
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    result = await task  # Task should complete now that response was received
+
+    assert result is not None
+    assert result.call_id == first_call_id
+    assert result.success is True
+    assert result.error_message == ""
+    assert result.response_data == b'{"result": "ok"}'
+
+    # Test that responses with different call_id are ignored until correct one arrives
+    sent_requests.clear()
+    task2 = asyncio.create_task(
+        client.execute_service(
+            service,
+            data={"arg1": False},
+            return_response=True,
+        )
+    )
+    await asyncio.sleep(0)
+
+    # Get second auto-generated call_id
+    assert len(sent_requests) == 1
+    second_call_id = sent_requests[0].call_id
+    assert second_call_id == first_call_id + 1  # Should increment
+
+    # Response with wrong call_id should be ignored
+    wrong_response: message.Message = ExecuteServiceResponsePb(
+        call_id=11111,
+        success=False,
+        error_message="Wrong call",
+        response_data=b"",
+    )
+    mock_data_received(protocol, generate_plaintext_packet(wrong_response))
+    await asyncio.sleep(0)
+    assert not task2.done()  # Task still waiting
+
+    # Correct call_id should be received
+    correct_response: message.Message = ExecuteServiceResponsePb(
+        call_id=second_call_id,
+        success=True,
+        error_message="",
+        response_data=b"",
+    )
+    mock_data_received(protocol, generate_plaintext_packet(correct_response))
+    result2 = await task2  # Task should complete now
+    assert result2 is not None
+    assert result2.call_id == second_call_id
+
+
+async def test_subscribe_service_calls(auth_client: APIClient) -> None:
+    send = patch_response_callback(auth_client)
+    on_service_call = MagicMock()
+    auth_client.subscribe_service_calls(on_service_call)
+    service_msg = HomeassistantActionRequest(service="bob")
+    await send(service_msg)
+    on_service_call.assert_called_with(HomeassistantServiceCall.from_pb(service_msg))
+
+
+async def test_send_homeassistant_service_call_response(auth_client: APIClient) -> None:
+    """Test sending a service call response back to ESPHome."""
+    send = patch_send(auth_client)
+
+    response_data = json.dumps({"result": "success", "value": "42"}).encode("utf-8")
+
+    # Test successful response
+    auth_client.send_homeassistant_action_response(
+        call_id=123,
+        response_data=response_data,
+        success=True,
+        error_message="",
+    )
+
+    expected_response = HomeassistantActionResponse()
+    expected_response.call_id = 123
+    expected_response.response_data = response_data
+    expected_response.success = True
+    expected_response.error_message = ""
+
+    send.assert_called_once_with(expected_response)
+
+
+async def test_send_homeassistant_service_call_response_error(
+    auth_client: APIClient,
+) -> None:
+    """Test sending an error service call response."""
+    send = patch_send(auth_client)
+
+    # Test error response
+    auth_client.send_homeassistant_action_response(
+        call_id=456,
+        response_data=b"",
+        success=False,
+        error_message="Service not found",
+    )
+
+    expected_response = HomeassistantActionResponse()
+    expected_response.call_id = 456
+    expected_response.response_data = b""
+    expected_response.success = False
+    expected_response.error_message = "Service not found"
+
+    send.assert_called_once_with(expected_response)
+
+
+async def test_homeassistant_service_call_with_new_fields(
+    auth_client: APIClient,
+) -> None:
+    """Test HomeassistantServiceCall model with new fields."""
+    service_call = HomeassistantServiceCall(
+        service="test.service",
+        is_event=False,
+        data={"param": "value"},
+        data_template={"template": "{{ state }}"},
+        variables={"var": "data"},
+        call_id=789,
+        response_template="Response: {{ response }}",
+    )
+
+    assert service_call.service == "test.service"
+    assert service_call.call_id == 789
+    assert service_call.response_template == "Response: {{ response }}"
+
+
+async def test_homeassistant_service_call_response_model() -> None:
+    """Test HomeassistantServiceCallResponse model."""
+    response_data = json.dumps({"result": "success", "value": 42}).encode("utf-8")
+    response = HomeassistantActionResponseModel(
+        call_id=123, response_data=response_data, success=True, error_message=""
+    )
+
+    assert response.call_id == 123
+    assert response.response_data == response_data
+    assert response.success is True
+    assert response.error_message == ""
+
+
+async def test_set_debug(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test set_debug."""
+    client, _connection, _transport, protocol = api_client
+    response: message.Message = DeviceInfoResponse(
+        name="realname",
+        friendly_name="My Device",
+        has_deep_sleep=True,
+    )
+
+    caplog.set_level(logging.DEBUG)
+
+    client.set_debug(True)
+    assert client.log_name == "fake @ 10.0.0.512"
+    device_info_task = asyncio.create_task(client.device_info())
+    await asyncio.sleep(0)
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await device_info_task
+
+    assert "My Device" in caplog.text
+    caplog.clear()
+    client.set_debug(False)
+    device_info_task = asyncio.create_task(client.device_info())
+    await asyncio.sleep(0)
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await device_info_task
+    assert "My Device" not in caplog.text
+
+
+async def test_force_disconnect(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test force disconnect can be called multiple times."""
+    client, connection, _transport, _protocol = api_client
+    assert connection.is_connected is True
+    assert connection.on_stop is not None
+    await client.disconnect(force=True)
+    assert client._connection is None
+    assert connection.is_connected is False
+    await client.disconnect(force=False)
+    assert connection.is_connected is False
+
+
+@pytest.mark.parametrize(
+    ("has_cache", "feature_flags", "method"),
+    [
+        (
+            False,
+            BluetoothProxyFeature.REMOTE_CACHING,
+            BluetoothDeviceRequestType.CONNECT_V3_WITHOUT_CACHE,
+        ),
+        (
+            True,
+            BluetoothProxyFeature.REMOTE_CACHING,
+            BluetoothDeviceRequestType.CONNECT_V3_WITH_CACHE,
+        ),
+    ],
+)
+async def test_bluetooth_device_connect(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+    has_cache: bool,
+    feature_flags: BluetoothProxyFeature,
+    method: BluetoothDeviceRequestType,
+) -> None:
+    """Test bluetooth_device_connect."""
+    client, _connection, transport, protocol = api_client
+    states = []
+
+    def on_bluetooth_connection_state(connected: bool, mtu: int, error: int) -> None:
+        states.append((connected, mtu, error))
+
+    connect_task = asyncio.create_task(
+        client.bluetooth_device_connect(
+            1234,
+            on_bluetooth_connection_state,
+            timeout=1,
+            feature_flags=feature_flags,
+            has_cache=has_cache,
+            disconnect_timeout=1,
+            address_type=1,
+        )
+    )
+    await asyncio.sleep(0)
+    response: message.Message = BluetoothDeviceConnectionResponse(
+        address=1234, connected=True, mtu=23, error=0
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+
+    cancel = await connect_task
+    assert states == [(True, 23, 0)]
+    transport.writelines.assert_called_once_with(
+        generate_split_plaintext_packet(
+            BluetoothDeviceRequest(
+                address=1234,
+                request_type=method,
+                has_address_type=True,
+                address_type=1,
+            ),
+        )
+    )
+    response: message.Message = BluetoothDeviceConnectionResponse(
+        address=1234, connected=False, mtu=23, error=7
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await asyncio.sleep(0)
+    assert states == [(True, 23, 0), (False, 23, 7)]
+    cancel()
+
+    # After cancel, no more messages should called back
+    response: message.Message = BluetoothDeviceConnectionResponse(
+        address=1234, connected=False, mtu=23, error=8
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await asyncio.sleep(0)
+    assert states == [(True, 23, 0), (False, 23, 7)]
+
+    # Make sure cancel is safe to call again
+    cancel()
+
+    await client.disconnect(force=True)
+    await asyncio.sleep(0)
+    assert not client._connection
+    # Make sure cancel is safe to call after disconnect
+    cancel()
+
+
+async def test_bluetooth_device_connect_without_cache_support_raises(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_device_connect raises when device doesn't support REMOTE_CACHING."""
+    client, _connection, _transport, _protocol = api_client
+
+    def on_bluetooth_connection_state(connected: bool, mtu: int, error: int) -> None:
+        pass
+
+    with pytest.raises(
+        ValueError, match="ESPHome device does not support REMOTE_CACHING feature"
+    ) as exc_info:
+        await client.bluetooth_device_connect(
+            1234,
+            on_bluetooth_connection_state,
+            timeout=1,
+            feature_flags=0,  # No REMOTE_CACHING feature
+            has_cache=False,
+            address_type=0,
+        )
+
+    assert "2022.12.0 or later" in str(exc_info.value)
+
+
+async def test_bluetooth_device_connect_without_address_type_raises(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_device_connect raises when address_type is None."""
+    client, _connection, _transport, _protocol = api_client
+
+    def on_bluetooth_connection_state(connected: bool, mtu: int, error: int) -> None:
+        pass
+
+    with pytest.raises(
+        ValueError,
+        match=r"address_type is required for Bluetooth connection.*cannot proceed without a valid address_type",
+    ):
+        await client.bluetooth_device_connect(
+            1234,
+            on_bluetooth_connection_state,
+            timeout=1,
+            feature_flags=BluetoothProxyFeature.REMOTE_CACHING,
+            has_cache=False,
+            address_type=None,
+        )
+
+
+async def test_bluetooth_device_connect_and_disconnect_times_out(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_device_connect and disconnect times out."""
+    client, _connection, _transport, _protocol = api_client
+    states = []
+
+    def on_bluetooth_connection_state(connected: bool, mtu: int, error: int) -> None:
+        states.append((connected, mtu, error))
+
+    connect_task = asyncio.create_task(
+        client.bluetooth_device_connect(
+            1234,
+            on_bluetooth_connection_state,
+            timeout=0,
+            feature_flags=0,
+            has_cache=True,
+            disconnect_timeout=0,
+            address_type=1,
+        )
+    )
+    with pytest.raises(TimeoutAPIError):
+        await connect_task
+    assert states == []
+
+
+async def test_bluetooth_device_connect_times_out_disconnect_ok(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_device_connect and disconnect times out."""
+    client, _connection, transport, protocol = api_client
+    states = []
+
+    def on_bluetooth_connection_state(connected: bool, mtu: int, error: int) -> None:
+        states.append((connected, mtu, error))
+
+    connect_task = asyncio.create_task(
+        client.bluetooth_device_connect(
+            1234,
+            on_bluetooth_connection_state,
+            timeout=0,
+            feature_flags=0,
+            has_cache=True,
+            disconnect_timeout=1,
+            address_type=1,
+        )
+    )
+    await asyncio.sleep(0)
+    # The connect request should be written
+    assert len(transport.writelines.mock_calls) == 1
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    # Now that we timed out, the disconnect
+    # request should be written
+    assert len(transport.writelines.mock_calls) == 2
+    response: message.Message = BluetoothDeviceConnectionResponse(
+        address=1234, connected=False, mtu=23, error=8
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    with pytest.raises(TimeoutAPIError):
+        await connect_task
+    assert states == []
+
+
+async def test_bluetooth_device_connect_cancelled(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_device_connect handles cancellation."""
+    client, connection, transport, _protocol = api_client
+    states = []
+
+    handlers_before = len(list(itertools.chain(*connection._message_handlers.values())))
+
+    def on_bluetooth_connection_state(connected: bool, mtu: int, error: int) -> None:
+        states.append((connected, mtu, error))
+
+    connect_task = asyncio.create_task(
+        client.bluetooth_device_connect(
+            1234,
+            on_bluetooth_connection_state,
+            timeout=10,
+            feature_flags=0,
+            has_cache=True,
+            disconnect_timeout=10,
+            address_type=1,
+        )
+    )
+    await asyncio.sleep(0)
+    # The connect request should be written
+    assert len(transport.writelines.mock_calls) == 1
+    connect_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await connect_task
+    assert states == []
+
+    # Ensure the disconnect request is written
+    assert len(transport.writelines.mock_calls) == 2
+    req = BluetoothDeviceRequest(
+        address=1234, request_type=BluetoothDeviceRequestType.DISCONNECT
+    ).SerializeToString()
+    assert transport.writelines.mock_calls[-1] == call([b"\x00", b"\x05", b"D", req])
+
+    handlers_after = len(list(itertools.chain(*connection._message_handlers.values())))
+    # Make sure we do not leak message handlers
+    assert handlers_after == handlers_before
+
+
+async def test_bluetooth_device_connect_future_cancelled_raises_api_error(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test that external cancellation of the connect_future raises APIConnectionError.
+
+    When the connect_future is cancelled externally (not via a cancel of the
+    awaiting task), the CancelledError should be converted into an
+    APIConnectionError so callers can treat it as a normal connection failure
+    instead of aborting with CancelledError.
+    """
+    client, connection, transport, _protocol = api_client
+    states = []
+
+    handlers_before = len(list(itertools.chain(*connection._message_handlers.values())))
+
+    def on_bluetooth_connection_state(connected: bool, mtu: int, error: int) -> None:
+        states.append((connected, mtu, error))
+
+    original_create_future = client._loop.create_future
+    captured: list[asyncio.Future[None]] = []
+
+    def capturing_create_future() -> asyncio.Future[None]:
+        fut = original_create_future()
+        captured.append(fut)
+        return fut
+
+    with patch.object(client._loop, "create_future", capturing_create_future):
+        connect_task = asyncio.create_task(
+            client.bluetooth_device_connect(
+                1234,
+                on_bluetooth_connection_state,
+                timeout=10,
+                feature_flags=0,
+                has_cache=True,
+                disconnect_timeout=10,
+                address_type=1,
+            )
+        )
+        await asyncio.sleep(0)
+        # The connect request should be written and the future captured
+        assert len(transport.writelines.mock_calls) == 1
+        assert len(captured) == 1
+        # Cancel the connect_future directly (not the task); this simulates
+        # an external cancel of the future itself.
+        captured[0].cancel()
+        with pytest.raises(APIConnectionError, match="cancelled"):
+            await connect_task
+        assert states == []
+        # Current task was not actually cancelled.
+        assert connect_task.cancelling() == 0
+
+    # The unsub + disconnect should have run, so handlers are not leaked.
+    handlers_after = len(list(itertools.chain(*connection._message_handlers.values())))
+    assert handlers_after == handlers_before
+
+
+async def test_bluetooth_device_connect_base_exception_propagates(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test a BaseException other than CancelledError propagates and cleans up.
+
+    The ``except BaseException`` branch must still run cleanup (unsub the
+    message handler and send a disconnect) and re-raise the original
+    exception unchanged.
+    """
+    client, connection, transport, _protocol = api_client
+    states = []
+
+    handlers_before = len(list(itertools.chain(*connection._message_handlers.values())))
+
+    def on_bluetooth_connection_state(connected: bool, mtu: int, error: int) -> None:
+        states.append((connected, mtu, error))
+
+    original_create_future = client._loop.create_future
+    captured: list[asyncio.Future[None]] = []
+
+    def capturing_create_future() -> asyncio.Future[None]:
+        fut = original_create_future()
+        captured.append(fut)
+        return fut
+
+    with patch.object(client._loop, "create_future", capturing_create_future):
+        connect_task = asyncio.create_task(
+            client.bluetooth_device_connect(
+                1234,
+                on_bluetooth_connection_state,
+                timeout=10,
+                feature_flags=0,
+                has_cache=True,
+                disconnect_timeout=10,
+                address_type=1,
+            )
+        )
+        await asyncio.sleep(0)
+        assert len(transport.writelines.mock_calls) == 1
+        assert len(captured) == 1
+
+        # Inject a non-CancelledError BaseException via the future so the
+        # ``except BaseException`` branch is exercised. A custom
+        # BaseException subclass avoids pytest's special handling of
+        # ``KeyboardInterrupt`` / ``SystemExit``.
+        class _TestBaseException(BaseException):
+            pass
+
+        captured[0].set_exception(_TestBaseException("boom"))
+        with pytest.raises(_TestBaseException, match="boom"):
+            await connect_task
+        assert states == []
+
+    # Ensure the disconnect request was written as cleanup.
+    assert len(transport.writelines.mock_calls) == 2
+    req = BluetoothDeviceRequest(
+        address=1234, request_type=BluetoothDeviceRequestType.DISCONNECT
+    ).SerializeToString()
+    assert transport.writelines.mock_calls[-1] == call([b"\x00", b"\x05", b"D", req])
+
+    # Ensure the message handler was unsubscribed.
+    handlers_after = len(list(itertools.chain(*connection._message_handlers.values())))
+    assert handlers_after == handlers_before
+
+
+async def test_bluetooth_device_connect_cleanup_contract(  # noqa: C901
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Pin the per-branch cleanup contract for ``bluetooth_device_connect``.
+
+    Each outcome (success, timeout, task-cancelled, future-cancelled,
+    base-exception) must call ``unsub`` and ``_bluetooth_disconnect_no_wait``
+    exactly the documented number of times and leave no leaked message
+    handlers or pending timeout handles.
+    """
+    client, connection, _transport, protocol = api_client
+
+    async def _run_branch(
+        trigger: Callable[
+            [asyncio.Task[Callable[[], None]], asyncio.Future[None]],
+            Awaitable[None],
+        ],
+        *,
+        timeout: float,
+        disconnect_timeout: float,
+        expected_unsub_calls: int,
+        expected_disconnect_calls: int,
+        expected_exception: type[BaseException] | None,
+    ) -> None:
+        handlers_before = len(
+            list(itertools.chain(*connection._message_handlers.values()))
+        )
+
+        original_callback = client._get_connection().send_message_callback_response
+        unsub_calls = 0
+
+        def counting_send_message_callback_response(
+            *args: Any, **kwargs: Any
+        ) -> Callable[[], None]:
+            real_unsub = original_callback(*args, **kwargs)
+
+            def counted_unsub() -> None:
+                nonlocal unsub_calls
+                unsub_calls += 1
+                real_unsub()
+
+            return counted_unsub
+
+        original_create_future = client._loop.create_future
+        captured: list[asyncio.Future[None]] = []
+
+        def capturing_create_future() -> asyncio.Future[None]:
+            fut = original_create_future()
+            captured.append(fut)
+            return fut
+
+        with (
+            patch.object(
+                client._get_connection(),
+                "send_message_callback_response",
+                counting_send_message_callback_response,
+            ),
+            patch.object(client._loop, "create_future", capturing_create_future),
+            patch.object(
+                client,
+                "_bluetooth_disconnect_no_wait",
+                wraps=client._bluetooth_disconnect_no_wait,
+            ) as disconnect_no_wait,
+        ):
+            connect_task = asyncio.create_task(
+                client.bluetooth_device_connect(
+                    1234,
+                    lambda connected, mtu, error: None,
+                    timeout=timeout,
+                    feature_flags=BluetoothProxyFeature.REMOTE_CACHING,
+                    has_cache=False,
+                    disconnect_timeout=disconnect_timeout,
+                    address_type=1,
+                )
+            )
+            await asyncio.sleep(0)
+            assert len(captured) == 1
+
+            if expected_exception is None:
+                await trigger(connect_task, captured[0])
+                cancel = await connect_task
+                # Success path: caller still owns unsub.
+                cancel()
+            else:
+                await trigger(connect_task, captured[0])
+                with pytest.raises(expected_exception):
+                    await connect_task
+
+        assert unsub_calls == expected_unsub_calls, (
+            f"expected {expected_unsub_calls} unsub calls, got {unsub_calls}"
+        )
+        assert disconnect_no_wait.call_count == expected_disconnect_calls, (
+            f"expected {expected_disconnect_calls} "
+            f"_bluetooth_disconnect_no_wait calls, got {disconnect_no_wait.call_count}"
+        )
+        handlers_after = len(
+            list(itertools.chain(*connection._message_handlers.values()))
+        )
+        assert handlers_after == handlers_before, (
+            "message handler leak — cleanup did not unsub"
+        )
+
+    async def _success(
+        _task: asyncio.Task[Callable[[], None]], _fut: asyncio.Future[None]
+    ) -> None:
+        mock_data_received(
+            protocol,
+            generate_plaintext_packet(
+                BluetoothDeviceConnectionResponse(
+                    address=1234, connected=True, mtu=23, error=0
+                )
+            ),
+        )
+
+    async def _timeout(
+        _task: asyncio.Task[Callable[[], None]], _fut: asyncio.Future[None]
+    ) -> None:
+        for _ in range(4):
+            await asyncio.sleep(0)
+
+    async def _task_cancel(
+        task: asyncio.Task[Callable[[], None]], _fut: asyncio.Future[None]
+    ) -> None:
+        task.cancel()
+
+    async def _future_cancel(
+        _task: asyncio.Task[Callable[[], None]], fut: asyncio.Future[None]
+    ) -> None:
+        fut.cancel()
+
+    class _Boom(BaseException):
+        pass
+
+    async def _base_exception(
+        _task: asyncio.Task[Callable[[], None]], fut: asyncio.Future[None]
+    ) -> None:
+        fut.set_exception(_Boom("boom"))
+
+    # Success: handler stays subscribed (caller cleans up via returned unsub).
+    await _run_branch(
+        _success,
+        timeout=1,
+        disconnect_timeout=1,
+        expected_unsub_calls=1,  # one from the test's final cancel() call
+        expected_disconnect_calls=0,
+        expected_exception=None,
+    )
+    # Timeout: unsub once, disconnect via guarded path (NOT _no_wait).
+    await _run_branch(
+        _timeout,
+        timeout=0,
+        disconnect_timeout=0,
+        expected_unsub_calls=1,
+        expected_disconnect_calls=0,
+        expected_exception=TimeoutAPIError,
+    )
+    # Task cancel: unsub + disconnect_no_wait once each, CancelledError propagates.
+    await _run_branch(
+        _task_cancel,
+        timeout=10,
+        disconnect_timeout=10,
+        expected_unsub_calls=1,
+        expected_disconnect_calls=1,
+        expected_exception=asyncio.CancelledError,
+    )
+    # External future cancel: same cleanup, but converted to APIConnectionError.
+    await _run_branch(
+        _future_cancel,
+        timeout=10,
+        disconnect_timeout=10,
+        expected_unsub_calls=1,
+        expected_disconnect_calls=1,
+        expected_exception=APIConnectionError,
+    )
+    # BaseException (non-Cancelled): same cleanup, original exception propagates.
+    await _run_branch(
+        _base_exception,
+        timeout=10,
+        disconnect_timeout=10,
+        expected_unsub_calls=1,
+        expected_disconnect_calls=1,
+        expected_exception=_Boom,
+    )
+
+
+async def test_send_voice_assistant_event(auth_client: APIClient) -> None:
+    send = patch_send(auth_client)
+
+    auth_client.send_voice_assistant_event(
+        VoiceAssistantEventModelType.VOICE_ASSISTANT_ERROR,
+        {"error": "error", "ok": "ok"},
+    )
+    send.assert_called_once_with(
+        VoiceAssistantEventResponse(
+            event_type=VoiceAssistantEventModelType.VOICE_ASSISTANT_ERROR.value,
+            data=[
+                VoiceAssistantEventData(name="error", value="error"),
+                VoiceAssistantEventData(name="ok", value="ok"),
+            ],
+        )
+    )
+
+    send.reset_mock()
+    auth_client.send_voice_assistant_event(
+        VoiceAssistantEventModelType.VOICE_ASSISTANT_ERROR, None
+    )
+    send.assert_called_once_with(
+        VoiceAssistantEventResponse(
+            event_type=VoiceAssistantEventModelType.VOICE_ASSISTANT_ERROR.value,
+            data=[],
+        )
+    )
+
+
+async def test_subscribe_voice_assistant(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test subscribe_voice_assistant."""
+    client, _connection, _transport, protocol = api_client
+    send = patch_send(client)
+    starts = []
+    stops = []
+    aborts = []
+
+    async def handle_start(
+        conversation_id: str,
+        flags: int,
+        audio_settings: VoiceAssistantAudioSettings,
+        wake_word_phrase: str | None,
+    ) -> int | None:
+        starts.append((conversation_id, flags, audio_settings, wake_word_phrase))
+        return 42
+
+    async def handle_stop(abort: bool) -> None:
+        if abort:
+            aborts.append(True)
+        else:
+            stops.append(True)
+
+    unsub = client.subscribe_voice_assistant(
+        handle_start=handle_start, handle_stop=handle_stop
+    )
+    send.assert_called_once_with(SubscribeVoiceAssistantRequest(subscribe=True))
+    send.reset_mock()
+    audio_settings = VoiceAssistantAudioSettings(
+        noise_suppression_level=42,
+        auto_gain=42,
+        volume_multiplier=42,
+    )
+    response: message.Message = VoiceAssistantRequest(
+        conversation_id="theone",
+        start=True,
+        flags=42,
+        audio_settings=audio_settings,
+        wake_word_phrase="okay nabu",
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert starts == [
+        (
+            "theone",
+            42,
+            VoiceAssistantAudioSettingsModel(
+                noise_suppression_level=42,
+                auto_gain=42,
+                volume_multiplier=42,
+            ),
+            "okay nabu",
+        )
+    ]
+    assert not stops
+    assert not aborts
+    send.assert_called_once_with(VoiceAssistantResponse(port=42))
+    send.reset_mock()
+    response: message.Message = VoiceAssistantRequest(
+        conversation_id="theone",
+        start=False,
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await asyncio.sleep(0)
+    assert not stops
+    assert aborts == [True]
+    send.reset_mock()
+    unsub()
+    send.assert_called_once_with(SubscribeVoiceAssistantRequest(subscribe=False))
+    send.reset_mock()
+    await client.disconnect(force=True)
+    # Ensure abort callback is a no-op after disconnect
+    # and does not raise
+    unsub()
+    assert len(send.mock_calls) == 0
+
+
+async def test_subscribe_voice_assistant_failure(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test subscribe_voice_assistant failure."""
+    client, _connection, _transport, protocol = api_client
+    send = patch_send(client)
+    starts = []
+    stops = []
+    aborts = []
+
+    async def handle_start(
+        conversation_id: str,
+        flags: int,
+        audio_settings: VoiceAssistantAudioSettings,
+        wake_word_phrase: str | None,
+    ) -> int | None:
+        starts.append((conversation_id, flags, audio_settings, wake_word_phrase))
+        # Return None to indicate failure
+        return None
+
+    async def handle_stop(abort: bool) -> None:
+        if abort:
+            aborts.append(True)
+        else:
+            stops.append(True)
+
+    unsub = client.subscribe_voice_assistant(
+        handle_start=handle_start, handle_stop=handle_stop
+    )
+    send.assert_called_once_with(SubscribeVoiceAssistantRequest(subscribe=True))
+    send.reset_mock()
+    audio_settings = VoiceAssistantAudioSettings(
+        noise_suppression_level=42,
+        auto_gain=42,
+        volume_multiplier=42,
+    )
+    response: message.Message = VoiceAssistantRequest(
+        conversation_id="theone",
+        start=True,
+        flags=42,
+        audio_settings=audio_settings,
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert starts == [
+        (
+            "theone",
+            42,
+            VoiceAssistantAudioSettingsModel(
+                noise_suppression_level=42,
+                auto_gain=42,
+                volume_multiplier=42,
+            ),
+            None,
+        )
+    ]
+    assert not stops
+    assert not aborts
+    send.assert_called_once_with(VoiceAssistantResponse(error=True))
+    send.reset_mock()
+    response: message.Message = VoiceAssistantRequest(
+        conversation_id="theone",
+        start=False,
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await asyncio.sleep(0)
+    assert not stops
+    assert aborts == [True]
+    send.reset_mock()
+    unsub()
+    send.assert_called_once_with(SubscribeVoiceAssistantRequest(subscribe=False))
+    send.reset_mock()
+    await client.disconnect(force=True)
+    # Ensure abort callback is a no-op after disconnect
+    # and does not raise
+    unsub()
+    assert len(send.mock_calls) == 0
+
+
+async def test_subscribe_voice_assistant_cancels_long_running_handle_start(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test subscribe_voice_assistant cancels long running tasks on unsub."""
+    client, _connection, _transport, protocol = api_client
+    send = patch_send(client)
+    starts = []
+    stops = []
+    aborts = []
+
+    async def handle_start(
+        conversation_id: str,
+        flags: int,
+        audio_settings: VoiceAssistantAudioSettings,
+        wake_word_phrase: str | None,
+    ) -> int | None:
+        starts.append((conversation_id, flags, audio_settings, wake_word_phrase))
+        await asyncio.sleep(10)
+        # Return None to indicate failure
+        starts.append("never")
+        return None
+
+    async def handle_stop(abort: bool) -> None:
+        if abort:
+            aborts.append(True)
+        else:
+            stops.append(True)
+
+    unsub = client.subscribe_voice_assistant(
+        handle_start=handle_start, handle_stop=handle_stop
+    )
+    send.assert_called_once_with(SubscribeVoiceAssistantRequest(subscribe=True))
+    send.reset_mock()
+    audio_settings = VoiceAssistantAudioSettings(
+        noise_suppression_level=42,
+        auto_gain=42,
+        volume_multiplier=42,
+    )
+    response: message.Message = VoiceAssistantRequest(
+        conversation_id="theone",
+        start=True,
+        flags=42,
+        audio_settings=audio_settings,
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    unsub()
+    await asyncio.sleep(0)
+    assert not stops
+    assert not aborts
+    assert starts == [
+        (
+            "theone",
+            42,
+            VoiceAssistantAudioSettingsModel(
+                noise_suppression_level=42,
+                auto_gain=42,
+                volume_multiplier=42,
+            ),
+            None,
+        )
+    ]
+
+
+async def test_subscribe_voice_assistant_api_audio(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test subscribe_voice_assistant."""
+    client, _connection, _transport, protocol = api_client
+    send = patch_send(client)
+    starts = []
+    stops = []
+    aborts = []
+    data_received = 0
+    data2_received = 0
+
+    async def handle_start(
+        conversation_id: str,
+        flags: int,
+        audio_settings: VoiceAssistantAudioSettings,
+        wake_word_phrase: str | None,
+    ) -> int | None:
+        starts.append((conversation_id, flags, audio_settings, wake_word_phrase))
+        return 0
+
+    async def handle_stop(abort: bool) -> None:
+        if abort:
+            aborts.append(True)
+        else:
+            stops.append(True)
+
+    async def handle_audio(data: bytes, data2: bytes | None = None) -> None:
+        nonlocal data_received, data2_received
+        data_received += len(data)
+        if data2:
+            data2_received += len(data2)
+
+    unsub = client.subscribe_voice_assistant(
+        handle_start=handle_start, handle_stop=handle_stop, handle_audio=handle_audio
+    )
+    send.assert_called_once_with(
+        SubscribeVoiceAssistantRequest(subscribe=True, flags=4)
+    )
+    send.reset_mock()
+    audio_settings = VoiceAssistantAudioSettings(
+        noise_suppression_level=42,
+        auto_gain=42,
+        volume_multiplier=42,
+    )
+    response: message.Message = VoiceAssistantRequest(
+        conversation_id="theone",
+        start=True,
+        flags=42,
+        audio_settings=audio_settings,
+        wake_word_phrase="okay nabu",
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert starts == [
+        (
+            "theone",
+            42,
+            VoiceAssistantAudioSettingsModel(
+                noise_suppression_level=42,
+                auto_gain=42,
+                volume_multiplier=42,
+            ),
+            "okay nabu",
+        )
+    ]
+    assert not stops
+    assert not aborts
+    send.assert_called_once_with(VoiceAssistantResponse(port=0))
+    send.reset_mock()
+
+    response: message.Message = VoiceAssistantAudio(
+        data=bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
+        data2=bytes([1, 2, 3, 4, 5]),  # second audio channel
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await asyncio.sleep(0)
+    assert data_received == 10
+    assert data2_received == 5
+
+    response: message.Message = VoiceAssistantAudio(
+        end=True,
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await asyncio.sleep(0)
+    assert stops == [True]
+
+    send.reset_mock()
+    client.send_voice_assistant_audio(bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))
+    send.assert_called_once_with(
+        VoiceAssistantAudio(data=bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))
+    )
+
+    response: message.Message = VoiceAssistantRequest(
+        conversation_id="theone",
+        start=False,
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+    await asyncio.sleep(0)
+    assert stops == [True]
+    assert aborts == [True]
+    send.reset_mock()
+    unsub()
+    send.assert_called_once_with(SubscribeVoiceAssistantRequest(subscribe=False))
+    send.reset_mock()
+    await client.disconnect(force=True)
+    # Ensure abort callback is a no-op after disconnect
+    # and does not raise
+    unsub()
+    assert len(send.mock_calls) == 0
+
+
+async def test_send_voice_assistant_timer_event(auth_client: APIClient) -> None:
+    send = patch_send(auth_client)
+
+    auth_client.send_voice_assistant_timer_event(
+        VoiceAssistantTimerEventModelType.VOICE_ASSISTANT_TIMER_STARTED,
+        timer_id="test",
+        name="test",
+        total_seconds=99,
+        seconds_left=45,
+        is_active=True,
+    )
+
+    send.assert_called_once_with(
+        VoiceAssistantTimerEventResponse(
+            event_type=VoiceAssistantTimerEventModelType.VOICE_ASSISTANT_TIMER_STARTED,
+            timer_id="test",
+            name="test",
+            total_seconds=99,
+            seconds_left=45,
+            is_active=True,
+        )
+    )
+
+
+async def test_send_voice_assistant_announcement_await_response(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    client, connection, _transport, protocol = api_client
+    original_send_message = connection.send_message
+
+    def send_message(msg):
+        assert msg == VoiceAssistantAnnounceRequest(
+            media_id="test-media-id", text="test-text"
+        )
+        original_send_message(msg)
+
+    with patch.object(connection, "send_message", new=send_message):
+        announcement_task = asyncio.create_task(
+            client.send_voice_assistant_announcement_await_response(
+                media_id="test-media-id", timeout=60.0, text="test-text"
+            )
+        )
+        await asyncio.sleep(0)
+        response: message.Message = VoiceAssistantAnnounceFinished(success=True)
+        mock_data_received(protocol, generate_plaintext_packet(response))
+        finished = await announcement_task
+        assert isinstance(finished, VoiceAssistantAnnounceFinishedModel)
+
+
+async def test_subscribe_voice_assistant_announcement_finished(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test subscribe_voice_assistant with handle_announcement_finished."""
+    client, _connection, _transport, protocol = api_client
+    send = patch_send(client)
+    done = asyncio.Event()
+
+    async def handle_start(
+        conversation_id: str,
+        flags: int,
+        audio_settings: VoiceAssistantAudioSettings,
+        wake_word_phrase: str | None,
+    ) -> int | None:
+        return 0
+
+    async def handle_stop() -> None:
+        pass
+
+    async def handle_announcement_finished(
+        finished: VoiceAssistantAnnounceFinishedModel,
+    ) -> None:
+        assert finished.success
+        done.set()
+
+    unsub = client.subscribe_voice_assistant(
+        handle_start=handle_start,
+        handle_stop=handle_stop,
+        handle_announcement_finished=handle_announcement_finished,
+    )
+    send.assert_called_once_with(
+        SubscribeVoiceAssistantRequest(subscribe=True, flags=0)
+    )
+    send.reset_mock()
+    response: message.Message = VoiceAssistantAnnounceFinished(success=True)
+    mock_data_received(protocol, generate_plaintext_packet(response))
+
+    await asyncio.wait_for(done.wait(), 1)
+
+    await client.disconnect(force=True)
+    # Ensure abort callback is a no-op after disconnect
+    # and does not raise
+    unsub()
+    assert len(send.mock_calls) == 0
+
+
+async def test_get_voice_assistant_configuration(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    client, connection, _transport, protocol = api_client
+    original_send_messages = connection.send_messages
+
+    def send_messages(msgs):
+        assert msgs == (VoiceAssistantConfigurationRequest(),)
+        original_send_messages(msgs)
+
+    with patch.object(connection, "send_messages", new=send_messages):
+        config_task = asyncio.create_task(
+            client.get_voice_assistant_configuration(timeout=1.0)
+        )
+        await asyncio.sleep(0)
+        response: message.Message = VoiceAssistantConfigurationResponse(
+            available_wake_words=[
+                VoiceAssistantWakeWord(
+                    id="1234",
+                    wake_word="okay nabu",
+                    trained_languages=["en"],
+                )
+            ],
+            active_wake_words=["1234"],
+            max_active_wake_words=1,
+        )
+        mock_data_received(protocol, generate_plaintext_packet(response))
+        config = await config_task
+        assert isinstance(config, VoiceAssistantConfigurationResponseModel)
+
+
+async def test_get_voice_assistant_configuration_external_wake_words(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    client, connection, _transport, protocol = api_client
+    original_send_messages = connection.send_messages
+
+    def send_messages(msgs):
+        assert msgs == (
+            VoiceAssistantConfigurationRequest(
+                external_wake_words=[
+                    VoiceAssistantExternalWakeWord(
+                        id="5678",
+                        wake_word="hey jarvis",
+                        trained_languages=["en"],
+                        model_type="micro",
+                        model_size=12345,
+                        model_hash="test hash",
+                        url="http://test.com/hey_jarvis.json",
+                    )
+                ]
+            ),
+        )
+        original_send_messages(msgs)
+
+    with patch.object(connection, "send_messages", new=send_messages):
+        config_task = asyncio.create_task(
+            client.get_voice_assistant_configuration(
+                timeout=1.0,
+                external_wake_words=[
+                    VoiceAssistantExternalWakeWordModel(
+                        id="5678",
+                        wake_word="hey jarvis",
+                        trained_languages=["en"],
+                        model_type="micro",
+                        model_size=12345,
+                        model_hash="test hash",
+                        url="http://test.com/hey_jarvis.json",
+                    )
+                ],
+            )
+        )
+        await asyncio.sleep(0)
+        response: message.Message = VoiceAssistantConfigurationResponse(
+            available_wake_words=[
+                VoiceAssistantWakeWord(
+                    id="1234",
+                    wake_word="okay nabu",
+                    trained_languages=["en"],
+                )
+            ],
+            active_wake_words=["1234"],
+            max_active_wake_words=1,
+        )
+        mock_data_received(protocol, generate_plaintext_packet(response))
+        config = await config_task
+        assert isinstance(config, VoiceAssistantConfigurationResponseModel)
+
+
+async def test_external_wake_words_convert_list() -> None:
+    wake_word_dict = {
+        "id": "5678",
+        "wake_word": "hey jarvis",
+        "trained_languages": ["en"],
+        "model_type": "micro",
+        "model_size": 12345,
+        "model_hash": "test hash",
+        "url": "http://test.com/hey_jarvis.json",
+    }
+
+    expected_wake_word = VoiceAssistantExternalWakeWordModel(**wake_word_dict)
+    for value in (wake_word_dict, VoiceAssistantExternalWakeWord(**wake_word_dict)):
+        assert VoiceAssistantExternalWakeWordModel.convert_list([value]) == [
+            expected_wake_word
+        ]
+
+
+async def test_set_voice_assistant_configuration(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    client, connection, _transport, _protocol = api_client
+    original_send_message = connection.send_message
+
+    def send_message(msg):
+        assert msg == VoiceAssistantSetConfiguration(active_wake_words=["1234"])
+        original_send_message(msg)
+
+    with patch.object(connection, "send_message", new=send_message):
+        await client.set_voice_assistant_configuration(["1234"])
+
+
+async def test_api_version_after_connection_closed(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test api version is None after connection close."""
+    client, _connection, _transport, _protocol = api_client
+    assert client.api_version == APIVersion(1, 9)
+    await client.disconnect(force=True)
+    assert client.api_version is None
+
+
+async def test_calls_after_connection_closed(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test calls after connection close should raise APIConnectionError."""
+    client, _connection, _transport, _protocol = api_client
+    assert client.api_version == APIVersion(1, 9)
+    await client.disconnect(force=True)
+    assert client.api_version is None
+    service = UserService(
+        name="my_service",
+        key=1,
+        args=[],
+    )
+    with pytest.raises(APIConnectionError):
+        await client.execute_service(service, {})
+    for method in (
+        client.button_command,
+        client.climate_command,
+        client.cover_command,
+        client.fan_command,
+        client.light_command,
+        client.valve_command,
+        client.media_player_command,
+        client.siren_command,
+        client.water_heater_command,
+    ):
+        with pytest.raises(APIConnectionError):
+            await method(1)
+
+    with pytest.raises(APIConnectionError):
+        await client.alarm_control_panel_command(1, AlarmControlPanelCommand.ARM_HOME)
+
+    with pytest.raises(APIConnectionError):
+        await client.date_command(1, 1, 1, 1)
+
+    with pytest.raises(APIConnectionError):
+        await client.lock_command(1, LockCommand.LOCK)
+
+    with pytest.raises(APIConnectionError):
+        await client.number_command(1, 1)
+
+    with pytest.raises(APIConnectionError):
+        await client.select_command(1, "1")
+
+    with pytest.raises(APIConnectionError):
+        await client.switch_command(1, True)
+
+    with pytest.raises(APIConnectionError):
+        await client.text_command(1, "1")
+
+    with pytest.raises(APIConnectionError):
+        await client.update_command(1, True)
+
+
+async def test_noise_encryption_set_key(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test set_noise_encryption_key."""
+    client, connection, _transport, protocol = api_client
+    original_send_message = connection.send_message
+
+    def send_message(msg):
+        assert msg == NoiseEncryptionSetKeyRequest(key=b"1234")
+        original_send_message(msg)
+
+    with patch.object(connection, "send_message", new=send_message):
+        set_task = asyncio.create_task(client.noise_encryption_set_key(b"1234"))
+        await asyncio.sleep(0)
+        response: message.Message = NoiseEncryptionSetKeyResponse(success=True)
+        mock_data_received(protocol, generate_plaintext_packet(response))
+        success = await set_task
+        assert success is True
+
+
+async def test_bluetooth_scanner_set_mode(
+    api_client: tuple[
+        APIClient, APIConnection, asyncio.Transport, APIPlaintextFrameHelper
+    ],
+) -> None:
+    """Test bluetooth_scanner_set_mode."""
+    client, _connection, _transport, protocol = api_client
+    send = patch_send(client)
+    done = asyncio.Event()
+
+    def _on_bluetooth_scanner_state(state: BluetoothScannerStateResponseModel) -> None:
+        assert state.mode == BluetoothScannerModeModel.ACTIVE
+        done.set()
+
+    unsub = client.subscribe_bluetooth_scanner_state(_on_bluetooth_scanner_state)
+
+    client.bluetooth_scanner_set_mode(BluetoothScannerModeModel.ACTIVE)
+
+    send.assert_called_once_with(
+        BluetoothScannerSetModeRequest(
+            mode=BluetoothScannerMode.BLUETOOTH_SCANNER_MODE_ACTIVE
+        )
+    )
+    send.reset_mock()
+
+    response: message.Message = BluetoothScannerStateResponse(
+        state=BluetoothScannerState.BLUETOOTH_SCANNER_STATE_RUNNING,
+        mode=BluetoothScannerMode.BLUETOOTH_SCANNER_MODE_ACTIVE,
+    )
+    mock_data_received(protocol, generate_plaintext_packet(response))
+
+    await asyncio.wait_for(done.wait(), 1)
+
+    unsub()
+
+
+@pytest.mark.parametrize(
+    ("method_name", "method_args", "expected_request"),
+    [
+        # Test with device_id=0 (default)
+        (
+            "switch_command",
+            {"key": 1, "state": True},
+            SwitchCommandRequest(key=1, state=True, device_id=0),
+        ),
+        # Test with device_id=5
+        (
+            "switch_command",
+            {"key": 1, "state": True, "device_id": 5},
+            SwitchCommandRequest(key=1, state=True, device_id=5),
+        ),
+        # Button command
+        ("button_command", {"key": 2}, ButtonCommandRequest(key=2, device_id=0)),
+        (
+            "button_command",
+            {"key": 2, "device_id": 10},
+            ButtonCommandRequest(key=2, device_id=10),
+        ),
+        # Number command
+        (
+            "number_command",
+            {"key": 3, "state": 50.0},
+            NumberCommandRequest(key=3, state=50.0, device_id=0),
+        ),
+        (
+            "number_command",
+            {"key": 3, "state": 50.0, "device_id": 15},
+            NumberCommandRequest(key=3, state=50.0, device_id=15),
+        ),
+        # Select command
+        (
+            "select_command",
+            {"key": 4, "state": "option1"},
+            SelectCommandRequest(key=4, state="option1", device_id=0),
+        ),
+        (
+            "select_command",
+            {"key": 4, "state": "option1", "device_id": 20},
+            SelectCommandRequest(key=4, state="option1", device_id=20),
+        ),
+        # Text command
+        (
+            "text_command",
+            {"key": 5, "state": "hello"},
+            TextCommandRequest(key=5, state="hello", device_id=0),
+        ),
+        (
+            "text_command",
+            {"key": 5, "state": "hello", "device_id": 25},
+            TextCommandRequest(key=5, state="hello", device_id=25),
+        ),
+        # Date command
+        (
+            "date_command",
+            {"key": 6, "year": 2024, "month": 1, "day": 1},
+            DateCommandRequest(key=6, year=2024, month=1, day=1, device_id=0),
+        ),
+        (
+            "date_command",
+            {"key": 6, "year": 2024, "month": 1, "day": 1, "device_id": 30},
+            DateCommandRequest(key=6, year=2024, month=1, day=1, device_id=30),
+        ),
+        # Time command
+        (
+            "time_command",
+            {"key": 7, "hour": 12, "minute": 30, "second": 0},
+            TimeCommandRequest(key=7, hour=12, minute=30, second=0, device_id=0),
+        ),
+        (
+            "time_command",
+            {"key": 7, "hour": 12, "minute": 30, "second": 0, "device_id": 35},
+            TimeCommandRequest(key=7, hour=12, minute=30, second=0, device_id=35),
+        ),
+        # DateTime command
+        (
+            "datetime_command",
+            {"key": 8, "epoch_seconds": 1234567890},
+            DateTimeCommandRequest(key=8, epoch_seconds=1234567890, device_id=0),
+        ),
+        (
+            "datetime_command",
+            {"key": 8, "epoch_seconds": 1234567890, "device_id": 40},
+            DateTimeCommandRequest(key=8, epoch_seconds=1234567890, device_id=40),
+        ),
+        # Update command
+        (
+            "update_command",
+            {"key": 9, "command": UpdateCommand.INSTALL},
+            UpdateCommandRequest(key=9, command=UpdateCommand.INSTALL, device_id=0),
+        ),
+        (
+            "update_command",
+            {"key": 9, "command": UpdateCommand.INSTALL, "device_id": 45},
+            UpdateCommandRequest(key=9, command=UpdateCommand.INSTALL, device_id=45),
+        ),
+        # Cover command
+        (
+            "cover_command",
+            {"key": 10, "position": 0.5},
+            CoverCommandRequest(key=10, device_id=0),
+        ),
+        (
+            "cover_command",
+            {"key": 10, "position": 0.5, "device_id": 50},
+            CoverCommandRequest(key=10, device_id=50),
+        ),
+        # Fan command
+        (
+            "fan_command",
+            {"key": 11, "state": True},
+            FanCommandRequest(key=11, device_id=0),
+        ),
+        (
+            "fan_command",
+            {"key": 11, "state": True, "device_id": 55},
+            FanCommandRequest(key=11, device_id=55),
+        ),
+        # Light command
+        (
+            "light_command",
+            {"key": 12, "state": True},
+            LightCommandRequest(key=12, device_id=0),
+        ),
+        (
+            "light_command",
+            {"key": 12, "state": True, "device_id": 60},
+            LightCommandRequest(key=12, device_id=60),
+        ),
+        # Climate command
+        (
+            "climate_command",
+            {"key": 13, "target_temperature": 22.0},
+            ClimateCommandRequest(key=13, device_id=0),
+        ),
+        (
+            "climate_command",
+            {"key": 13, "target_temperature": 22.0, "device_id": 65},
+            ClimateCommandRequest(key=13, device_id=65),
+        ),
+        # Siren command
+        (
+            "siren_command",
+            {"key": 14, "state": True},
+            SirenCommandRequest(key=14, device_id=0),
+        ),
+        (
+            "siren_command",
+            {"key": 14, "state": True, "device_id": 70},
+            SirenCommandRequest(key=14, device_id=70),
+        ),
+        # Lock command
+        (
+            "lock_command",
+            {"key": 15, "command": LockCommand.LOCK},
+            LockCommandRequest(key=15, command=LockCommand.LOCK, device_id=0),
+        ),
+        (
+            "lock_command",
+            {"key": 15, "command": LockCommand.LOCK, "device_id": 75},
+            LockCommandRequest(key=15, command=LockCommand.LOCK, device_id=75),
+        ),
+        # Valve command
+        (
+            "valve_command",
+            {"key": 16, "position": 0.5},
+            ValveCommandRequest(key=16, device_id=0),
+        ),
+        (
+            "valve_command",
+            {"key": 16, "position": 0.5, "device_id": 80},
+            ValveCommandRequest(key=16, device_id=80),
+        ),
+        # Media player command
+        (
+            "media_player_command",
+            {"key": 17, "command": MediaPlayerCommand.PLAY},
+            MediaPlayerCommandRequest(key=17, device_id=0),
+        ),
+        (
+            "media_player_command",
+            {"key": 17, "command": MediaPlayerCommand.PLAY, "device_id": 85},
+            MediaPlayerCommandRequest(key=17, device_id=85),
+        ),
+        # Alarm control panel command
+        (
+            "alarm_control_panel_command",
+            {"key": 18, "command": AlarmControlPanelCommand.DISARM},
+            AlarmControlPanelCommandRequest(
+                key=18, command=AlarmControlPanelCommand.DISARM, device_id=0
+            ),
+        ),
+        (
+            "alarm_control_panel_command",
+            {"key": 18, "command": AlarmControlPanelCommand.DISARM, "device_id": 90},
+            AlarmControlPanelCommandRequest(
+                key=18, command=AlarmControlPanelCommand.DISARM, device_id=90
+            ),
+        ),
+        # Water Heater command
+        (
+            "water_heater_command",
+            {"key": 19, "mode": WaterHeaterMode.ECO},
+            WaterHeaterCommandRequest(
+                key=19,
+                device_id=0,
+                has_fields=WaterHeaterCommandField.MODE,
+                mode=WaterHeaterMode.ECO,
+            ),
+        ),
+        (
+            "water_heater_command",
+            {"key": 19, "mode": WaterHeaterMode.ECO, "device_id": 95},
+            WaterHeaterCommandRequest(
+                key=19,
+                device_id=95,
+                has_fields=WaterHeaterCommandField.MODE,
+                mode=WaterHeaterMode.ECO,
+            ),
+        ),
+    ],
+)
+async def test_device_id_in_commands(
+    auth_client: APIClient,
+    method_name: str,
+    method_args: dict[str, Any],
+    expected_request: Any,
+) -> None:
+    """Test that device_id is properly passed through all command methods and defaults to 0."""
+    send = patch_send(auth_client)
+    # Set API version for commands that need it (like cover_command)
+    patch_api_version(auth_client, APIVersion(1, 1))
+
+    # Call the command method
+    method = getattr(auth_client, method_name)
+    method(**method_args)
+
+    # Verify send_message was called once
+    assert send.call_count == 1
+
+    # Get the actual request that was sent
+    actual_request = send.call_args[0][0]
+
+    # Verify it's the correct request type
+    assert type(actual_request) is type(expected_request)
+
+    # Verify key and device_id match
+    assert actual_request.key == expected_request.key
+    assert actual_request.device_id == expected_request.device_id

@@ -3,8 +3,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#define close closesocket
+#define read(s, b, l) recv(s, b, l, 0)
+#define write(s, b, l) send(s, b, l, 0)
+#define MSG_NOSIGNAL 0
+#else
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#endif
+
 #include <stdbool.h>
 #include <sodium.h>
 #include <noise/protocol.h>
@@ -81,11 +95,8 @@ static bool decode_bytes_cb(pb_istream_t *stream, const pb_field_iter_t *field, 
     pb_arg_t *dest = (pb_arg_t *)*arg;
     (void)field;
 
-    uint64_t len;
-    if (!pb_decode_varint(stream, &len)) return false;
-    if (len > dest->length) return false;
-
-    dest->length = (size_t)len;
+    if (stream->bytes_left > dest->length) return false;
+    dest->length = stream->bytes_left;
     return pb_read(stream, (uint8_t *)dest->buffer, dest->length);
 }
 
@@ -158,9 +169,11 @@ static size_t encrypt_message(
 {
     EncryptedMessage enc = EncryptedMessage_init_default;
     uint8_t ciphertext[2048];
+    if (plaintext_len > 0 && plaintext != NULL) {
+        memcpy(ciphertext, plaintext, plaintext_len);
+    }
     NoiseBuffer mbuf;
-    noise_buffer_set_output(mbuf, ciphertext, sizeof(ciphertext));
-    noise_buffer_set_input(mbuf, (uint8_t*)plaintext, plaintext_len);
+    noise_buffer_set_inout(mbuf, ciphertext, plaintext_len, sizeof(ciphertext));
 
     if (noise_cipherstate_encrypt(send_cipher, &mbuf) != NOISE_ERROR_NONE) return 0;
 
@@ -193,7 +206,7 @@ static bool decrypt_message(const uint8_t *payload,
     pb_istream_t stream = pb_istream_from_buffer(payload, len);
     
     if (!pb_decode(&stream, EncryptedMessage_fields, &enc)) {
-        printf("Failed to decode EncryptedMessage\n");
+        printf("Failed to decode EncryptedMessage: %s\n", PB_GET_ERROR(&stream));
         return false;
     }
     
@@ -215,7 +228,18 @@ static bool decrypt_message(const uint8_t *payload,
    MAIN
 --------------------------------------------------------- */
 int main() {
+    setvbuf(stdout, NULL, _IONBF, 0);
     if (sodium_init() < 0) return 1;
+
+#ifdef _WIN32
+    {
+        WSADATA wsaData;
+        if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+            fprintf(stderr, "WSAStartup failed\n");
+            return 1;
+        }
+    }
+#endif
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in addr = {0};
@@ -226,6 +250,12 @@ int main() {
     bind(server_fd, (struct sockaddr*)&addr, sizeof(addr));
     listen(server_fd, 1);
 
+    // Device needs its own static key pair
+    uint8_t device_priv[32], device_pub[32];
+    crypto_box_keypair(device_pub, device_priv);
+    char device_pub_b64[64];
+    sodium_bin2base64(device_pub_b64, sizeof(device_pub_b64), device_pub, 32, sodium_base64_VARIANT_ORIGINAL);
+    printf("FAKE DEVICE: Generated public key: %s\n", device_pub_b64);
     printf("FAKE DEVICE: Waiting on port 6053\n");
 
     socklen_t addrlen = sizeof(addr);
@@ -234,35 +264,78 @@ int main() {
 
     /* ---------------- NOISE HANDSHAKE (IK) ---------------- */
     NoiseHandshakeState *hs;
-    noise_handshakestate_new_by_name(&hs, "Noise_IK_25519_ChaChaPoly_SHA256", NOISE_ROLE_RESPONDER);
-    noise_handshakestate_set_prologue(hs, "NoiseAPIInit\0\0", 14);
+    int err;
+    err = noise_handshakestate_new_by_name(&hs, "Noise_IK_25519_ChaChaPoly_SHA256", NOISE_ROLE_RESPONDER);
+    if (err != NOISE_ERROR_NONE) {
+        printf("FAKE DEVICE: noise_handshakestate_new_by_name failed: %d\n", err);
+        return 1;
+    }
+    err = noise_handshakestate_set_prologue(hs, "NoiseAPIInit\0\0", 14);
+    if (err != NOISE_ERROR_NONE) {
+        printf("FAKE DEVICE: noise_handshakestate_set_prologue failed: %d\n", err);
+        return 1;
+    }
 
-    // Device needs its own static key pair
-    uint8_t device_priv[32], device_pub[32];
-    crypto_box_keypair(device_pub, device_priv);
-    noise_handshakestate_set_static_key(hs, device_pub, 32);
+    err = noise_dhstate_set_keypair(noise_handshakestate_get_local_keypair_dh(hs), device_priv, 32, device_pub, 32);
+    if (err != NOISE_ERROR_NONE) {
+        printf("FAKE DEVICE: noise_dhstate_set_keypair failed: %d\n", err);
+        return 1;
+    }
 
-    noise_handshakestate_start(hs);
+    err = noise_handshakestate_start(hs);
+    if (err != NOISE_ERROR_NONE) {
+        printf("FAKE DEVICE: noise_handshakestate_start failed: %d\n", err);
+        return 1;
+    }
 
     // 1. Receive first handshake message
     uint8_t noise_hdr[3];
-    read(client_fd, noise_hdr, 3);
+    printf("FAKE DEVICE: Waiting for client noise frame header...\n");
+    if (read(client_fd, noise_hdr, 3) != 3) {
+        printf("FAKE DEVICE: Failed to read client noise frame header\n");
+        return 1;
+    }
     uint16_t noise_len = (noise_hdr[1] << 8) | noise_hdr[2];
+    printf("FAKE DEVICE: Reading client noise frame payload of size %u...\n", noise_len);
     uint8_t handshake_buf[512];
-    read(client_fd, handshake_buf, noise_len);
+    if (read(client_fd, handshake_buf, noise_len) != noise_len) {
+        printf("FAKE DEVICE: Failed to read client noise frame payload\n");
+        return 1;
+    }
     
     NoiseBuffer mbuf;
     noise_buffer_set_input(mbuf, handshake_buf, noise_len);
-    noise_handshakestate_read_message(hs, &mbuf, NULL);
+    err = noise_handshakestate_read_message(hs, &mbuf, NULL);
+    if (err != NOISE_ERROR_NONE) {
+        printf("FAKE DEVICE: noise_handshakestate_read_message failed: %d\n", err);
+        return 1;
+    }
+    printf("FAKE DEVICE: Successfully read client handshake message!\n");
 
     // 2. Send second handshake message
     noise_buffer_set_output(mbuf, handshake_buf, sizeof(handshake_buf));
-    noise_handshakestate_write_message(hs, &mbuf, NULL);
+    err = noise_handshakestate_write_message(hs, &mbuf, NULL);
+    if (err != NOISE_ERROR_NONE) {
+        printf("FAKE DEVICE: noise_handshakestate_write_message failed: %d\n", err);
+        return 1;
+    }
     uint8_t noise_frame[3] = { 0x01, (mbuf.size >> 8) & 0xFF, mbuf.size & 0xFF };
-    write(client_fd, noise_frame, 3);
-    write(client_fd, mbuf.data, mbuf.size);
+    printf("FAKE DEVICE: Sending server noise frame header (%02x %02x %02x), payload size %zu\n", noise_frame[0], noise_frame[1], noise_frame[2], mbuf.size);
+    if (write(client_fd, noise_frame, 3) != 3) {
+        printf("FAKE DEVICE: Failed to write noise frame header\n");
+        return 1;
+    }
+    if (write(client_fd, mbuf.data, mbuf.size) != (ssize_t)mbuf.size) {
+        printf("FAKE DEVICE: Failed to write noise frame payload\n");
+        return 1;
+    }
 
-    noise_handshakestate_split(hs, &send_cipher, &recv_cipher);
+    err = noise_handshakestate_split(hs, &send_cipher, &recv_cipher);
+    if (err != NOISE_ERROR_NONE) {
+        printf("FAKE DEVICE: noise_handshakestate_split failed: %d\n", err);
+        return 1;
+    }
+    printf("FAKE DEVICE: Noise handshake split successfully!\n");
 
     /* ---------------------------------------------------------
        1. HelloRequest -> HelloResponse

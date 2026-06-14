@@ -1,0 +1,11 @@
+---
+name: Lock closed issues and PRs
+
+on:
+  schedule:
+    - cron: "30 0 * * *"  # Run daily at 00:30 UTC
+  workflow_dispatch:
+
+jobs:
+  lock:
+    uses: esphome/workflows/.github/workflows/lock.yml@025a1e6255610c498ed590403b7e510b69e474df  # 2026.4.1

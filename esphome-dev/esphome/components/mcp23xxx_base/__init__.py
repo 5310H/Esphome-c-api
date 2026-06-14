@@ -1,0 +1,116 @@
+from esphome import pins
+import esphome.codegen as cg
+import esphome.config_validation as cv
+from esphome.const import (
+    CONF_ALLOW_OTHER_USES,
+    CONF_ID,
+    CONF_INPUT,
+    CONF_INTERRUPT,
+    CONF_INTERRUPT_PIN,
+    CONF_INVERTED,
+    CONF_MODE,
+    CONF_NUMBER,
+    CONF_OPEN_DRAIN_INTERRUPT,
+    CONF_OUTPUT,
+    CONF_PULLUP,
+)
+from esphome.core import CORE, ID, coroutine
+
+AUTO_LOAD = ["gpio_expander"]
+CODEOWNERS = ["@jesserockz"]
+
+mcp23xxx_base_ns = cg.esphome_ns.namespace("mcp23xxx_base")
+MCP23XXXBase = mcp23xxx_base_ns.class_("MCP23XXXBase", cg.Component)
+MCP23XXXGPIOPin = mcp23xxx_base_ns.class_("MCP23XXXGPIOPin", cg.GPIOPin)
+MCP23XXXInterruptMode = mcp23xxx_base_ns.enum("MCP23XXXInterruptMode")
+
+MCP23XXX_INTERRUPT_MODES = {
+    "NO_INTERRUPT": MCP23XXXInterruptMode.MCP23XXX_NO_INTERRUPT,
+    "CHANGE": MCP23XXXInterruptMode.MCP23XXX_CHANGE,
+    "RISING": MCP23XXXInterruptMode.MCP23XXX_RISING,
+    "FALLING": MCP23XXXInterruptMode.MCP23XXX_FALLING,
+}
+
+
+def _validate_interrupt_pin(value):
+    # The MCP component owns INT polarity (active-low, hardcoded falling-edge ISR)
+    # and installs a single ISR per GPIO, so neither inversion nor sharing is supported.
+    value = pins.internal_gpio_input_pin_schema(value)
+    if value.get(CONF_INVERTED):
+        raise cv.Invalid(
+            f"'{CONF_INVERTED}: true' is not supported on '{CONF_INTERRUPT_PIN}'; "
+            "the MCP23xxx INT line is fixed active-low"
+        )
+    if value.get(CONF_ALLOW_OTHER_USES):
+        raise cv.Invalid(
+            f"'{CONF_ALLOW_OTHER_USES}: true' is not supported on '{CONF_INTERRUPT_PIN}'; "
+            "sharing the interrupt pin between multiple MCP23xxx (or other components) "
+            "is not implemented. Remove the interrupt_pin to fall back to polling."
+        )
+    return value
+
+
+MCP23XXX_CONFIG_SCHEMA = cv.Schema(
+    {
+        cv.Optional(CONF_OPEN_DRAIN_INTERRUPT, default=False): cv.boolean,
+        cv.Optional(CONF_INTERRUPT_PIN): _validate_interrupt_pin,
+    }
+).extend(cv.COMPONENT_SCHEMA)
+
+
+@coroutine
+async def register_mcp23xxx(config, num_pins):
+    id: ID = config[CONF_ID]
+    var = cg.new_Pvariable(id)
+    await cg.register_component(var, config)
+    CORE.data.setdefault(CONF_MCP23XXX, {})[id.id] = num_pins
+    cg.add(var.set_open_drain_ints(config[CONF_OPEN_DRAIN_INTERRUPT]))
+    if interrupt_pin := config.get(CONF_INTERRUPT_PIN):
+        cg.add(var.set_interrupt_pin(await cg.gpio_pin_expression(interrupt_pin)))
+    return var
+
+
+def validate_mode(value):
+    if not (value[CONF_INPUT] or value[CONF_OUTPUT]):
+        raise cv.Invalid("Mode must be either input or output")
+    if value[CONF_INPUT] and value[CONF_OUTPUT]:
+        raise cv.Invalid("Mode must be either input or output")
+    if value[CONF_PULLUP] and not value[CONF_INPUT]:
+        raise cv.Invalid("Pullup only available with input")
+    return value
+
+
+CONF_MCP23XXX = "mcp23xxx"
+
+MCP23XXX_PIN_SCHEMA = pins.gpio_base_schema(
+    MCP23XXXGPIOPin,
+    cv.int_range(min=0, max=15),
+    modes=[CONF_INPUT, CONF_OUTPUT, CONF_PULLUP],
+    mode_validator=validate_mode,
+    invertible=True,
+).extend(
+    {
+        cv.Required(CONF_MCP23XXX): cv.use_id(MCP23XXXBase),
+        cv.Optional(CONF_INTERRUPT, default="NO_INTERRUPT"): cv.enum(
+            MCP23XXX_INTERRUPT_MODES, upper=True
+        ),
+    }
+)
+
+
+@pins.PIN_SCHEMA_REGISTRY.register(CONF_MCP23XXX, MCP23XXX_PIN_SCHEMA)
+async def mcp23xxx_pin_to_code(config):
+    parent_id: ID = config[CONF_MCP23XXX]
+    parent = await cg.get_variable(parent_id)
+
+    num_pins = cg.TemplateArguments(CORE.data[CONF_MCP23XXX][parent_id.id])
+
+    var = cg.new_Pvariable(config[CONF_ID], num_pins)
+    cg.add(var.set_parent(parent))
+
+    num = config[CONF_NUMBER]
+    cg.add(var.set_pin(num))
+    cg.add(var.set_inverted(config[CONF_INVERTED]))
+    cg.add(var.set_flags(pins.gpio_flags_expr(config[CONF_MODE])))
+    cg.add(var.set_interrupt_mode(config[CONF_INTERRUPT]))
+    return var

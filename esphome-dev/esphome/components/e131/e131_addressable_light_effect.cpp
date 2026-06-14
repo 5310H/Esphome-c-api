@@ -1,0 +1,95 @@
+#include "e131_addressable_light_effect.h"
+#include "e131.h"
+#ifdef USE_NETWORK
+#include "esphome/core/log.h"
+
+namespace esphome::e131 {
+
+static const char *const TAG = "e131_addressable_light_effect";
+static const int MAX_DATA_SIZE = (sizeof(E131Packet::values) - 1);
+
+E131AddressableLightEffect::E131AddressableLightEffect(const char *name) : AddressableLightEffect(name) {}
+
+int E131AddressableLightEffect::get_data_per_universe() const { return get_lights_per_universe() * channels_; }
+
+int E131AddressableLightEffect::get_lights_per_universe() const { return MAX_DATA_SIZE / channels_; }
+
+int E131AddressableLightEffect::get_first_universe() const { return first_universe_; }
+
+int E131AddressableLightEffect::get_last_universe() const { return first_universe_ + get_universe_count() - 1; }
+
+int E131AddressableLightEffect::get_universe_count() const {
+  // Round up to lights_per_universe
+  auto lights = get_lights_per_universe();
+  return (get_addressable_()->size() + lights - 1) / lights;
+}
+
+void E131AddressableLightEffect::start() {
+  AddressableLightEffect::start();
+
+  if (this->e131_) {
+    this->e131_->add_effect(this);
+  }
+}
+
+void E131AddressableLightEffect::stop() {
+  if (this->e131_) {
+    this->e131_->remove_effect(this);
+  }
+
+  AddressableLightEffect::stop();
+}
+
+void E131AddressableLightEffect::apply(light::AddressableLight &it, const Color &current_color) {
+  // ignore, it is run by `E131Component::update()`
+}
+
+bool E131AddressableLightEffect::process_(int universe, const E131Packet &packet) {
+  auto *it = get_addressable_();
+
+  // check if this is our universe and data are valid
+  if (universe < first_universe_ || universe > get_last_universe())
+    return false;
+
+  int32_t output_offset = (universe - first_universe_) * get_lights_per_universe();
+  // limit amount of lights per universe and received
+  // packet.count is the number of DMX bytes including start code; divide by channels to get the number of lights
+  int lights_in_packet = (packet.count > 0) ? (packet.count - 1) / channels_ : 0;
+  int output_end = std::min({it->size(), output_offset + get_lights_per_universe(), output_offset + lights_in_packet});
+  auto *input_data = packet.values + 1;
+
+  auto effect_name = get_name();
+  ESP_LOGV(TAG, "Applying data for '%.*s' on %d universe, for %" PRId32 "-%d.", (int) effect_name.size(),
+           effect_name.c_str(), universe, output_offset, output_end);
+
+  switch (channels_) {
+    case E131_MONO:
+      for (; output_offset < output_end; output_offset++, input_data++) {
+        auto output = (*it)[output_offset];
+        output.set(Color(input_data[0], input_data[0], input_data[0], input_data[0]));
+      }
+      break;
+
+    case E131_RGB:
+      for (; output_offset < output_end; output_offset++, input_data += 3) {
+        auto output = (*it)[output_offset];
+        output.set(
+            Color(input_data[0], input_data[1], input_data[2], (input_data[0] + input_data[1] + input_data[2]) / 3));
+      }
+      break;
+
+    case E131_RGBW:
+      for (; output_offset < output_end; output_offset++, input_data += 4) {
+        auto output = (*it)[output_offset];
+        output.set(Color(input_data[0], input_data[1], input_data[2], input_data[3]));
+      }
+      break;
+  }
+
+  it->schedule_show();
+  return true;
+}
+
+}  // namespace esphome::e131
+
+#endif

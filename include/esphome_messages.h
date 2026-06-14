@@ -16,6 +16,12 @@ extern "C" {
 typedef enum {
     ESPH_MSG_HELLO_REQUEST           = 1,
     ESPH_MSG_HELLO_RESPONSE          = 2,
+    ESPH_MSG_CONNECT_REQUEST         = 3,
+    ESPH_MSG_CONNECT_RESPONSE        = 4,
+    ESPH_MSG_DISCONNECT_REQUEST      = 5,
+    ESPH_MSG_DISCONNECT_RESPONSE     = 6,
+    ESPH_MSG_PING_REQUEST            = 7,
+    ESPH_MSG_PING_RESPONSE           = 8,
     ESPH_MSG_DEVICE_INFO_REQUEST     = 9,
     ESPH_MSG_DEVICE_INFO_RESPONSE    = 10,
     ESPH_MSG_SUBSCRIBE_STATES_REQUEST = 20,
@@ -23,29 +29,24 @@ typedef enum {
 } esph_msg_type_t;
 
 /**
- * Encode a message into a protobuf frame.
+ * Encode a message type varint into a buffer.
  *
- * @param type     Message type enum
- * @param payload  Pointer to the Nanopb-generated struct for this message type
+ * @param type     Message type
  * @param out      Output buffer
  * @param maxlen   Maximum bytes available in output buffer
  * @return number of bytes written, <0 on failure
  */
-int esph_encode_message(esph_msg_type_t type,
-                        const void *payload,
-                        uint8_t *out, int maxlen);
+int esph_encode_varint(uint32_t value, uint8_t *out, int maxlen);
 
 /**
- * Decode a protobuf frame.
+ * Decode a message type varint from a buffer.
  *
- * Placeholder implementation:
- *   - Currently does nothing
- *
- * @param buf   Input buffer
- * @param len   Length of input buffer
- * @return 0 on success, <0 on failure
+ * @param buf      Input buffer
+ * @param len      Length of input buffer
+ * @param value    Pointer to store the decoded value
+ * @return number of bytes read, <0 on failure
  */
-int esph_decode_message(const uint8_t *buf, int len);
+int esph_decode_varint(const uint8_t *buf, int len, uint32_t *value);
 
 #ifdef __cplusplus
 }

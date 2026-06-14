@@ -1,0 +1,130 @@
+#include "automation.h"
+#include "esphome/core/log.h"
+
+namespace esphome::binary_sensor {
+
+static const char *const TAG = "binary_sensor.automation";
+
+// MultiClickTrigger timeout IDs.
+// MultiClickTrigger is its own Component instance, so the scheduler scopes
+// IDs by component pointer — no risk of collisions between instances.
+constexpr uint32_t MULTICLICK_TRIGGER_ID = 0;
+constexpr uint32_t MULTICLICK_COOLDOWN_ID = 1;
+constexpr uint32_t MULTICLICK_IS_VALID_ID = 2;
+constexpr uint32_t MULTICLICK_IS_NOT_VALID_ID = 3;
+
+void MultiClickTriggerBase::on_state_(bool state) {
+  // Handle duplicate events
+  if (state == this->last_state_) {
+    return;
+  }
+  this->last_state_ = state;
+
+  // Cooldown: Do not immediately try matching after having invalid timing
+  if (this->is_in_cooldown_) {
+    return;
+  }
+
+  if (!this->at_index_.has_value()) {
+    // Start matching
+    MultiClickTriggerEvent evt = this->timing_[0];
+    if (evt.state == state) {
+      ESP_LOGV(TAG, "START min=%" PRIu32 " max=%" PRIu32, evt.min_length, evt.max_length);
+      ESP_LOGV(TAG, "Multi Click: Starting multi click action!");
+      this->at_index_ = 1;
+      if (this->timing_count_ == 1 && evt.max_length == 4294967294UL) {
+        this->set_timeout(MULTICLICK_TRIGGER_ID, evt.min_length, [this]() { this->trigger_(); });
+      } else {
+        this->schedule_is_valid_(evt.min_length);
+        this->schedule_is_not_valid_(evt.max_length);
+      }
+    } else {
+      ESP_LOGV(TAG, "Multi Click: action not started because first level does not match!");
+    }
+
+    return;
+  }
+
+  if (!this->is_valid_) {
+    this->schedule_cooldown_();
+    return;
+  }
+
+  // at_index_ has a value here (the !has_value() branch above returns).
+  size_t at_index = *this->at_index_;
+  if (at_index == this->timing_count_) {
+    this->trigger_();
+    return;
+  }
+
+  MultiClickTriggerEvent evt = this->timing_[at_index];
+
+  if (evt.max_length != 4294967294UL) {
+    ESP_LOGV(TAG, "A i=%zu min=%" PRIu32 " max=%" PRIu32, at_index, evt.min_length, evt.max_length);  // NOLINT
+    this->schedule_is_valid_(evt.min_length);
+    this->schedule_is_not_valid_(evt.max_length);
+  } else if (at_index + 1 != this->timing_count_) {
+    ESP_LOGV(TAG, "B i=%zu min=%" PRIu32, at_index, evt.min_length);  // NOLINT
+    this->cancel_timeout(MULTICLICK_IS_NOT_VALID_ID);
+    this->schedule_is_valid_(evt.min_length);
+  } else {
+    ESP_LOGV(TAG, "C i=%zu min=%" PRIu32, at_index, evt.min_length);  // NOLINT
+    this->is_valid_ = false;
+    this->cancel_timeout(MULTICLICK_IS_NOT_VALID_ID);
+    this->set_timeout(MULTICLICK_TRIGGER_ID, evt.min_length, [this]() { this->trigger_(); });
+  }
+
+  this->at_index_ = at_index + 1;
+}
+void MultiClickTriggerBase::schedule_cooldown_() {
+  ESP_LOGV(TAG, "Multi Click: Invalid length of press, starting cooldown of %" PRIu32 " ms", this->invalid_cooldown_);
+  this->is_in_cooldown_ = true;
+  this->set_timeout(MULTICLICK_COOLDOWN_ID, this->invalid_cooldown_, [this]() {
+    ESP_LOGV(TAG, "Multi Click: Cooldown ended, matching is now enabled again.");
+    this->is_in_cooldown_ = false;
+  });
+  this->at_index_.reset();
+  this->cancel_timeout(MULTICLICK_TRIGGER_ID);
+  this->cancel_timeout(MULTICLICK_IS_VALID_ID);
+  this->cancel_timeout(MULTICLICK_IS_NOT_VALID_ID);
+}
+void MultiClickTriggerBase::schedule_is_valid_(uint32_t min_length) {
+  if (min_length == 0) {
+    this->is_valid_ = true;
+    return;
+  }
+  this->is_valid_ = false;
+  this->set_timeout(MULTICLICK_IS_VALID_ID, min_length, [this]() {
+    ESP_LOGV(TAG, "Multi Click: You can now %s the button.", this->parent_->state ? "RELEASE" : "PRESS");
+    this->is_valid_ = true;
+  });
+}
+void MultiClickTriggerBase::schedule_is_not_valid_(uint32_t max_length) {
+  this->set_timeout(MULTICLICK_IS_NOT_VALID_ID, max_length, [this]() {
+    ESP_LOGV(TAG, "Multi Click: You waited too long to %s.", this->parent_->state ? "RELEASE" : "PRESS");
+    this->is_valid_ = false;
+    this->schedule_cooldown_();
+  });
+}
+void MultiClickTriggerBase::cancel() {
+  ESP_LOGV(TAG, "Multi Click: Sequence explicitly cancelled.");
+  this->is_valid_ = false;
+  this->schedule_cooldown_();
+}
+void MultiClickTriggerBase::trigger_() {
+  ESP_LOGV(TAG, "Multi Click: Hooray, multi click is valid. Triggering!");
+  this->at_index_.reset();
+  this->cancel_timeout(MULTICLICK_TRIGGER_ID);
+  this->cancel_timeout(MULTICLICK_IS_VALID_ID);
+  this->cancel_timeout(MULTICLICK_IS_NOT_VALID_ID);
+  this->trigger();
+}
+
+bool match_interval(uint32_t min_length, uint32_t max_length, uint32_t length) {
+  if (max_length == 0) {
+    return length >= min_length;
+  } else {
+    return length >= min_length && length <= max_length;
+  }
+}
+}  // namespace esphome::binary_sensor

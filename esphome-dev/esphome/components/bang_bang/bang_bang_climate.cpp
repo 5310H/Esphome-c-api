@@ -1,0 +1,233 @@
+#include "bang_bang_climate.h"
+#include "esphome/core/log.h"
+
+namespace esphome::bang_bang {
+
+static const char *const TAG = "bang_bang.climate";
+
+BangBangClimate::BangBangClimate() = default;
+
+void BangBangClimate::setup() {
+  this->sensor_->add_on_state_callback([this](float state) {
+    this->current_temperature = state;
+    // control may have changed, recompute
+    this->compute_state_();
+    // current temperature changed, publish state
+    this->publish_state();
+  });
+  this->current_temperature = this->sensor_->state;
+
+  // register for humidity values and get initial state
+  if (this->humidity_sensor_ != nullptr) {
+    this->humidity_sensor_->add_on_state_callback([this](float state) {
+      this->current_humidity = state;
+      this->publish_state();
+    });
+    this->current_humidity = this->humidity_sensor_->state;
+  }
+
+  // restore set points
+  auto restore = this->restore_state_();
+  if (restore.has_value()) {
+    restore->to_call(this).perform();
+  } else {
+    // restore from defaults, change_away handles those for us
+    if (this->supports_cool_ && this->supports_heat_) {
+      this->mode = climate::CLIMATE_MODE_HEAT_COOL;
+    } else if (this->supports_cool_) {
+      this->mode = climate::CLIMATE_MODE_COOL;
+    } else if (this->supports_heat_) {
+      this->mode = climate::CLIMATE_MODE_HEAT;
+    }
+    this->change_away_(false);
+  }
+}
+
+void BangBangClimate::control(const climate::ClimateCall &call) {
+  auto mode = call.get_mode();
+  if (mode.has_value()) {
+    this->mode = *mode;
+  }
+  auto target_temperature_low = call.get_target_temperature_low();
+  if (target_temperature_low.has_value()) {
+    this->target_temperature_low = *target_temperature_low;
+  }
+  auto target_temperature_high = call.get_target_temperature_high();
+  if (target_temperature_high.has_value()) {
+    this->target_temperature_high = *target_temperature_high;
+  }
+  auto preset = call.get_preset();
+  if (preset.has_value()) {
+    this->change_away_(*preset == climate::CLIMATE_PRESET_AWAY);
+  }
+
+  this->compute_state_();
+  this->publish_state();
+}
+
+climate::ClimateTraits BangBangClimate::traits() {
+  auto traits = climate::ClimateTraits();
+  traits.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE |
+                           climate::CLIMATE_REQUIRES_TWO_POINT_TARGET_TEMPERATURE | climate::CLIMATE_SUPPORTS_ACTION);
+  if (this->humidity_sensor_ != nullptr) {
+    traits.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_HUMIDITY);
+  }
+  traits.set_supported_modes({
+      climate::CLIMATE_MODE_OFF,
+  });
+  if (this->supports_cool_) {
+    traits.add_supported_mode(climate::CLIMATE_MODE_COOL);
+  }
+  if (this->supports_heat_) {
+    traits.add_supported_mode(climate::CLIMATE_MODE_HEAT);
+  }
+  if (this->supports_cool_ && this->supports_heat_) {
+    traits.add_supported_mode(climate::CLIMATE_MODE_HEAT_COOL);
+  }
+  if (this->supports_away_) {
+    traits.set_supported_presets({
+        climate::CLIMATE_PRESET_HOME,
+        climate::CLIMATE_PRESET_AWAY,
+    });
+  }
+  return traits;
+}
+
+void BangBangClimate::compute_state_() {
+  if (this->mode == climate::CLIMATE_MODE_OFF) {
+    this->switch_to_action_(climate::CLIMATE_ACTION_OFF);
+    return;
+  }
+  if (std::isnan(this->current_temperature) || std::isnan(this->target_temperature_low) ||
+      std::isnan(this->target_temperature_high)) {
+    // if any control parameters are nan, go to OFF action (not IDLE!)
+    this->switch_to_action_(climate::CLIMATE_ACTION_OFF);
+    return;
+  }
+  const bool too_cold = this->current_temperature < this->target_temperature_low;
+  const bool too_hot = this->current_temperature > this->target_temperature_high;
+
+  climate::ClimateAction target_action;
+  if (too_cold) {
+    // too cold -> enable heating if possible and enabled, else idle
+    if (this->supports_heat_ &&
+        (this->mode == climate::CLIMATE_MODE_HEAT_COOL || this->mode == climate::CLIMATE_MODE_HEAT)) {
+      target_action = climate::CLIMATE_ACTION_HEATING;
+    } else {
+      target_action = climate::CLIMATE_ACTION_IDLE;
+    }
+  } else if (too_hot) {
+    // too hot -> enable cooling if possible and enabled, else idle
+    if (this->supports_cool_ &&
+        (this->mode == climate::CLIMATE_MODE_HEAT_COOL || this->mode == climate::CLIMATE_MODE_COOL)) {
+      target_action = climate::CLIMATE_ACTION_COOLING;
+    } else {
+      target_action = climate::CLIMATE_ACTION_IDLE;
+    }
+  } else {
+    // neither too hot nor too cold -> in range
+    if (this->supports_cool_ && this->supports_heat_ && this->mode == climate::CLIMATE_MODE_HEAT_COOL) {
+      // if supports both ends and both cooling and heating enabled, go to idle action
+      target_action = climate::CLIMATE_ACTION_IDLE;
+    } else {
+      // else use current mode and don't change (hysteresis)
+      target_action = this->action;
+    }
+  }
+
+  this->switch_to_action_(target_action);
+}
+
+void BangBangClimate::switch_to_action_(climate::ClimateAction action) {
+  if (action == this->action) {
+    // already in target mode
+    return;
+  }
+
+  if ((action == climate::CLIMATE_ACTION_OFF && this->action == climate::CLIMATE_ACTION_IDLE) ||
+      (action == climate::CLIMATE_ACTION_IDLE && this->action == climate::CLIMATE_ACTION_OFF)) {
+    // switching from OFF to IDLE or vice-versa
+    // these only have visual difference. OFF means user manually disabled,
+    // IDLE means it's in auto mode but value is in target range.
+    this->action = action;
+    this->publish_state();
+    return;
+  }
+
+  if (this->prev_trigger_ != nullptr) {
+    this->prev_trigger_->stop_action();
+    this->prev_trigger_ = nullptr;
+  }
+  Trigger<> *trig;
+  switch (action) {
+    case climate::CLIMATE_ACTION_OFF:
+    case climate::CLIMATE_ACTION_IDLE:
+      trig = &this->idle_trigger_;
+      break;
+    case climate::CLIMATE_ACTION_COOLING:
+      trig = &this->cool_trigger_;
+      break;
+    case climate::CLIMATE_ACTION_HEATING:
+      trig = &this->heat_trigger_;
+      break;
+    default:
+      trig = nullptr;
+  }
+  if (trig != nullptr) {
+    trig->trigger();
+  } else {
+    ESP_LOGW(TAG, "trig not set - unsupported action");
+  }
+  this->action = action;
+  this->prev_trigger_ = trig;
+  this->publish_state();
+}
+
+void BangBangClimate::change_away_(bool away) {
+  if (!away) {
+    this->target_temperature_low = this->normal_config_.default_temperature_low;
+    this->target_temperature_high = this->normal_config_.default_temperature_high;
+  } else {
+    this->target_temperature_low = this->away_config_.default_temperature_low;
+    this->target_temperature_high = this->away_config_.default_temperature_high;
+  }
+  this->preset = away ? climate::CLIMATE_PRESET_AWAY : climate::CLIMATE_PRESET_HOME;
+}
+
+void BangBangClimate::set_normal_config(const BangBangClimateTargetTempConfig &normal_config) {
+  this->normal_config_ = normal_config;
+}
+
+void BangBangClimate::set_away_config(const BangBangClimateTargetTempConfig &away_config) {
+  this->supports_away_ = true;
+  this->away_config_ = away_config;
+}
+
+void BangBangClimate::set_sensor(sensor::Sensor *sensor) { this->sensor_ = sensor; }
+void BangBangClimate::set_humidity_sensor(sensor::Sensor *humidity_sensor) { this->humidity_sensor_ = humidity_sensor; }
+
+Trigger<> *BangBangClimate::get_idle_trigger() { return &this->idle_trigger_; }
+Trigger<> *BangBangClimate::get_cool_trigger() { return &this->cool_trigger_; }
+Trigger<> *BangBangClimate::get_heat_trigger() { return &this->heat_trigger_; }
+
+void BangBangClimate::set_supports_cool(bool supports_cool) { this->supports_cool_ = supports_cool; }
+void BangBangClimate::set_supports_heat(bool supports_heat) { this->supports_heat_ = supports_heat; }
+
+void BangBangClimate::dump_config() {
+  LOG_CLIMATE("", "Bang Bang Climate", this);
+  ESP_LOGCONFIG(TAG,
+                "  Supports HEAT: %s\n"
+                "  Supports COOL: %s\n"
+                "  Supports AWAY mode: %s\n"
+                "  Default Target Temperature Low: %.2f°C\n"
+                "  Default Target Temperature High: %.2f°C",
+                YESNO(this->supports_heat_), YESNO(this->supports_cool_), YESNO(this->supports_away_),
+                this->normal_config_.default_temperature_low, this->normal_config_.default_temperature_high);
+}
+
+BangBangClimateTargetTempConfig::BangBangClimateTargetTempConfig() = default;
+BangBangClimateTargetTempConfig::BangBangClimateTargetTempConfig(float default_temperature_low,
+                                                                 float default_temperature_high)
+    : default_temperature_low(default_temperature_low), default_temperature_high(default_temperature_high) {}
+
+}  // namespace esphome::bang_bang

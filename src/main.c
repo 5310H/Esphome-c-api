@@ -1,11 +1,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <arpa/inet.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <time.h>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#define close closesocket
+#define read(s, b, l) recv(s, b, l, 0)
+#define write(s, b, l) send(s, b, l, 0)
+#else
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#endif
 
 #include <sodium.h>
 #include <noise/protocol.h>
@@ -14,9 +25,7 @@
 #include "pb_decode.h"
 #include "api.pb.h"
 
-// Forward declaration to silence warnings if the installed headers are an older version
-extern int noise_handshakestate_set_remote_public_key(NoiseHandshakeState *state, 
-                                                     const uint8_t *public_key, size_t len);
+
 
 
 /* ---------------------------------------------------------
@@ -155,11 +164,8 @@ static bool decode_bytes_cb(pb_istream_t *stream, const pb_field_iter_t *field, 
     pb_arg_t *dest = (pb_arg_t *)*arg;
     (void)field;
 
-    uint64_t len;
-    if (!pb_decode_varint(stream, &len)) return false;
-    if (len > dest->length) return false;
-
-    dest->length = (size_t)len;
+    if (stream->bytes_left > dest->length) return false;
+    dest->length = stream->bytes_left;
     return pb_read(stream, (uint8_t *)dest->buffer, dest->length);
 }
 
@@ -176,11 +182,15 @@ static size_t encrypt_message(uint32_t inner_type,
 {
     EncryptedMessage enc = EncryptedMessage_init_default;
     uint8_t ciphertext[2048];
+    if (plaintext_len > 0 && plaintext != NULL) {
+        memcpy(ciphertext, plaintext, plaintext_len);
+    }
     NoiseBuffer mbuf;
-    noise_buffer_set_output(mbuf, ciphertext, sizeof(ciphertext));
-    noise_buffer_set_input(mbuf, (uint8_t*)plaintext, plaintext_len);
+    noise_buffer_set_inout(mbuf, ciphertext, plaintext_len, sizeof(ciphertext));
 
-    if (noise_cipherstate_encrypt(send_cipher, &mbuf) != NOISE_ERROR_NONE) {
+    int err = noise_cipherstate_encrypt(send_cipher, &mbuf);
+    if (err != NOISE_ERROR_NONE) {
+        printf("Client encrypt: noise_cipherstate_encrypt failed: %d\n", err);
         return 0;
     }
     
@@ -191,6 +201,9 @@ static size_t encrypt_message(uint32_t inner_type,
     enc.data.arg = &arg_payload;
 
     size_t written = encode_message(EncryptedMessage_fields, &enc, out);
+    if (written == 0) {
+        printf("Client encrypt: encode_message failed\n");
+    }
     return written;
 }
 
@@ -213,7 +226,7 @@ static bool decrypt_message(const uint8_t *payload,
     pb_istream_t stream = pb_istream_from_buffer(payload, len);
     
     if (!pb_decode(&stream, EncryptedMessage_fields, &enc)) {
-        printf("Failed to decode EncryptedMessage\n");
+        printf("Failed to decode EncryptedMessage: %s\n", PB_GET_ERROR(&stream));
         return false;
     }
     
@@ -236,6 +249,7 @@ static bool decrypt_message(const uint8_t *payload,
  * --------------------------------------------------------- */
 int main(int argc, char *argv[])
 {
+    setvbuf(stdout, NULL, _IONBF, 0);
     const char *host = "127.0.0.1";
     int port         = 6053;
     const char *psk_b64 = "your_base64_encryption_key"; // The "Encryption Key" from YAML
@@ -255,6 +269,16 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+#ifdef _WIN32
+    {
+        WSADATA wsaData;
+        if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+            fprintf(stderr, "WSAStartup failed\n");
+            return 1;
+        }
+    }
+#endif
+
     printf("Connecting to %s:%d...\n", host, port);
 
     /* Connect TCP */
@@ -265,7 +289,11 @@ int main(int argc, char *argv[])
     inet_pton(AF_INET, host, &addr.sin_addr);
 
     if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+#ifdef _WIN32
+        fprintf(stderr, "Connection failed: Winsock error %d\n", WSAGetLastError());
+#else
         perror("Connection failed");
+#endif
         close(sock);
         return 1;
     }
@@ -273,40 +301,94 @@ int main(int argc, char *argv[])
 
     /* ---------------- NOISE HANDSHAKE (IK) ---------------- */
     NoiseHandshakeState *hs;
-    noise_handshakestate_new_by_name(&hs, "Noise_IK_25519_ChaChaPoly_SHA256", NOISE_ROLE_INITIATOR);
+    int err;
+    err = noise_handshakestate_new_by_name(&hs, "Noise_IK_25519_ChaChaPoly_SHA256", NOISE_ROLE_INITIATOR);
+    if (err != NOISE_ERROR_NONE) {
+        fprintf(stderr, "noise_handshakestate_new_by_name failed: %d\n", err);
+        return 1;
+    }
     
     // The "Right" prologue for ESPHome 2026
     const char *prologue = "NoiseAPIInit\0\0"; 
-    noise_handshakestate_set_prologue(hs, prologue, 14);
+    err = noise_handshakestate_set_prologue(hs, prologue, 14);
+    if (err != NOISE_ERROR_NONE) {
+        fprintf(stderr, "noise_handshakestate_set_prologue failed: %d\n", err);
+        return 1;
+    }
 
     // Decode the server public key from base64
     uint8_t server_pub_key[32];
     size_t out_len;
     sodium_base642bin(server_pub_key, 32, psk_b64, strlen(psk_b64), NULL, &out_len, NULL, sodium_base64_VARIANT_ORIGINAL);
-    noise_handshakestate_set_remote_public_key(hs, server_pub_key, 32);
+    err = noise_dhstate_set_public_key(noise_handshakestate_get_remote_public_key_dh(hs), server_pub_key, 32);
+    if (err != NOISE_ERROR_NONE) {
+        fprintf(stderr, "noise_dhstate_set_public_key failed: %d\n", err);
+        return 1;
+    }
 
-    noise_handshakestate_start(hs);
+    // Client needs its own static key pair for Noise IK
+    uint8_t client_priv[32], client_pub[32];
+    crypto_box_keypair(client_pub, client_priv);
+    err = noise_dhstate_set_keypair(noise_handshakestate_get_local_keypair_dh(hs), client_priv, 32, client_pub, 32);
+    if (err != NOISE_ERROR_NONE) {
+        fprintf(stderr, "noise_dhstate_set_keypair failed: %d\n", err);
+        return 1;
+    }
+
+    err = noise_handshakestate_start(hs);
+    if (err != NOISE_ERROR_NONE) {
+        fprintf(stderr, "noise_handshakestate_start failed: %d\n", err);
+        return 1;
+    }
 
     // 1. Send first handshake message (Client -> Server)
     uint8_t handshake_buf[512];
     NoiseBuffer mbuf;
     noise_buffer_set_output(mbuf, handshake_buf, sizeof(handshake_buf));
-    noise_handshakestate_write_message(hs, &mbuf, NULL);
+    err = noise_handshakestate_write_message(hs, &mbuf, NULL);
+    if (err != NOISE_ERROR_NONE) {
+        fprintf(stderr, "noise_handshakestate_write_message failed: %d\n", err);
+        return 1;
+    }
     
     // ESPHome Noise framing: 0x01 + 2-byte length
     uint8_t noise_frame[3] = { 0x01, (mbuf.size >> 8) & 0xFF, mbuf.size & 0xFF };
-    write(sock, noise_frame, 3);
-    write(sock, mbuf.data, mbuf.size);
+    printf("Client sending noise frame header (%02x %02x %02x), payload size %zu\n", noise_frame[0], noise_frame[1], noise_frame[2], mbuf.size);
+    if (write(sock, noise_frame, 3) != 3) {
+        fprintf(stderr, "Failed to send noise frame header\n");
+        return 1;
+    }
+    if (write(sock, mbuf.data, mbuf.size) != (ssize_t)mbuf.size) {
+        fprintf(stderr, "Failed to send noise frame payload\n");
+        return 1;
+    }
 
     // 2. Receive second handshake message (Server -> Client)
     uint8_t recv_frame_hdr[3];
-    read(sock, recv_frame_hdr, 3);
+    printf("Client waiting for server noise frame header...\n");
+    if (read(sock, recv_frame_hdr, 3) != 3) {
+        fprintf(stderr, "Failed to read server noise frame header\n");
+        return 1;
+    }
     uint16_t noise_len = (recv_frame_hdr[1] << 8) | recv_frame_hdr[2];
-    read(sock, handshake_buf, noise_len);
+    printf("Client reading server noise frame payload of size %u...\n", noise_len);
+    if (read(sock, handshake_buf, noise_len) != noise_len) {
+        fprintf(stderr, "Failed to read server noise frame payload\n");
+        return 1;
+    }
     
     noise_buffer_set_input(mbuf, handshake_buf, noise_len);
-    noise_handshakestate_read_message(hs, &mbuf, NULL);
-    noise_handshakestate_split(hs, &send_cipher, &recv_cipher);
+    err = noise_handshakestate_read_message(hs, &mbuf, NULL);
+    if (err != NOISE_ERROR_NONE) {
+        fprintf(stderr, "noise_handshakestate_read_message failed: %d\n", err);
+        return 1;
+    }
+    err = noise_handshakestate_split(hs, &send_cipher, &recv_cipher);
+    if (err != NOISE_ERROR_NONE) {
+        fprintf(stderr, "noise_handshakestate_split failed: %d\n", err);
+        return 1;
+    }
+    printf("Noise handshake completed and split successfully!\n");
 
     /* ---------------- HELLO ---------------- */
     HelloRequest hello = HelloRequest_init_default;

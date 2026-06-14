@@ -1,0 +1,79 @@
+#include "alarm_control_panel.h"
+#include "esphome/core/defines.h"
+#include "esphome/core/controller_registry.h"
+
+#include <utility>
+
+#include "esphome/core/application.h"
+#include "esphome/core/helpers.h"
+#include "esphome/core/log.h"
+
+namespace esphome::alarm_control_panel {
+
+static const char *const TAG = "alarm_control_panel";
+
+AlarmControlPanelCall AlarmControlPanel::make_call() { return AlarmControlPanelCall(this); }
+
+bool AlarmControlPanel::is_state_armed(AlarmControlPanelState state) {
+  switch (state) {
+    case ACP_STATE_ARMED_AWAY:
+    case ACP_STATE_ARMED_HOME:
+    case ACP_STATE_ARMED_NIGHT:
+    case ACP_STATE_ARMED_VACATION:
+    case ACP_STATE_ARMED_CUSTOM_BYPASS:
+      return true;
+    default:
+      return false;
+  }
+};
+
+void AlarmControlPanel::publish_state(AlarmControlPanelState state) {
+  this->last_update_ = millis();
+  if (state != this->current_state_) {
+    auto prev_state = this->current_state_;
+    ESP_LOGV(TAG, "'%s' >> %s (was %s)", this->get_name().c_str(),
+             LOG_STR_ARG(alarm_control_panel_state_to_string(state)),
+             LOG_STR_ARG(alarm_control_panel_state_to_string(prev_state)));
+    this->current_state_ = state;
+    // Single state callback - listeners receive the new state as an argument
+    this->state_callback_.call(state);
+#if defined(USE_ALARM_CONTROL_PANEL) && defined(USE_CONTROLLER_REGISTRY)
+    ControllerRegistry::notify_alarm_control_panel_update(this);
+#endif
+    // Cleared fires when leaving TRIGGERED state
+    if (prev_state == ACP_STATE_TRIGGERED) {
+      this->cleared_callback_.call();
+    }
+    if (state == this->desired_state_) {
+      // only store when in the desired state
+      this->pref_.save(&state);
+    }
+  }
+}
+
+void AlarmControlPanel::arm_with_code_(AlarmControlPanelCall &(AlarmControlPanelCall::*arm_method)(),
+                                       const char *code) {
+  auto call = this->make_call();
+  (call.*arm_method)();
+  if (code != nullptr)
+    call.set_code(code);
+  call.perform();
+}
+
+void AlarmControlPanel::arm_away(const char *code) { this->arm_with_code_(&AlarmControlPanelCall::arm_away, code); }
+
+void AlarmControlPanel::arm_home(const char *code) { this->arm_with_code_(&AlarmControlPanelCall::arm_home, code); }
+
+void AlarmControlPanel::arm_night(const char *code) { this->arm_with_code_(&AlarmControlPanelCall::arm_night, code); }
+
+void AlarmControlPanel::arm_vacation(const char *code) {
+  this->arm_with_code_(&AlarmControlPanelCall::arm_vacation, code);
+}
+
+void AlarmControlPanel::arm_custom_bypass(const char *code) {
+  this->arm_with_code_(&AlarmControlPanelCall::arm_custom_bypass, code);
+}
+
+void AlarmControlPanel::disarm(const char *code) { this->arm_with_code_(&AlarmControlPanelCall::disarm, code); }
+
+}  // namespace esphome::alarm_control_panel

@@ -9,24 +9,29 @@
 #include <pb_encode.h>
 #include <pb_decode.h>
 
-// Internal helper: encode a Frame and send it
+int esph_frame_send(esph_session_t *s, const uint8_t *plaintext, size_t plen);
+int esph_frame_recv(esph_session_t *s, uint8_t *out, size_t *out_len);
+
+
+// Internal helper: encode a frame and send it
 static int send_frame(esph_session_t *s, uint32_t type,
                       const uint8_t *payload, size_t plen)
 {
     uint8_t buf[1024];
     pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
 
-    esphome_api_Frame frame = esphome_api_Frame_init_zero;
-    frame.type = type;
-    frame.payload.size = plen;
-    memcpy(frame.payload.bytes, payload, plen);
-
-    if (!pb_encode(&stream, esphome_api_Frame_fields, &frame)) {
-        fprintf(stderr, "[PROTO] Frame encode failed\n");
+    if (!pb_encode_varint(&stream, type)) {
+        fprintf(stderr, "[PROTO] Frame type encode failed\n");
         return -1;
     }
 
-    size_t frame_len = stream.bytes_written;
+    if (stream.bytes_written + plen > sizeof(buf)) {
+        fprintf(stderr, "[PROTO] Frame too large\n");
+        return -1;
+    }
+
+    memcpy(buf + stream.bytes_written, payload, plen);
+    size_t frame_len = stream.bytes_written + plen;
     return esph_frame_send(s, buf, frame_len);
 }
 
