@@ -76,14 +76,31 @@ int main() {
 
 ## Building and Running (CLI Client)
 
-Ensure you have MinGW installed and the `noise-c` library built and accessible to the compiler.
+Ensure you have the `noise-c` library built and accessible to the compiler (update the `LDFLAGS` in `Makefile` if necessary to point to its location).
 
-```bash
+### Windows (MinGW)
+Ensure you have MinGW installed.
+```powershell
 mingw32-make
-./real_esphome_client.exe <IP_ADDRESS> <PSK_BASE64> [PORT]
+.\get_status.exe <IP_ADDRESS> <PSK_BASE64>
+.\real_esphome_client.exe <IP_ADDRESS> <PSK_BASE64> [PORT]
 ```
 
-Example:
+### Linux / macOS
+Ensure you have `gcc` and `make` installed.
 ```bash
-./real_esphome_client.exe 192.168.1.100 "w4200oZ5WWe2T9aR3v+2K7A7P0q/Lw8E0Jb/c1fN/hQ=" 6053
+make
+./get_status <IP_ADDRESS> <PSK_BASE64>
+./real_esphome_client <IP_ADDRESS> <PSK_BASE64> [PORT]
+```
+
+### Examples
+One-shot connection to fetch and display current status (great for scripts):
+```bash
+./get_status 192.168.1.100 "w4200oZ5WWe2T9aR3v+2K7A7P0q/Lw8E0Jb/c1fN/hQ="
+```
+
+Continuous run to test the event loop and stream real-time updates:
+```bash
+./real_esphome_client 192.168.1.100 "w4200oZ5WWe2T9aR3v+2K7A7P0q/Lw8E0Jb/c1fN/hQ=" 6053
 ```
