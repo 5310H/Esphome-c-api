@@ -45,7 +45,8 @@ int esph_set_switch(esph_session_t *s, const char *entity_id, int state);
 
 // Run a single iteration of the receive loop to process incoming packets (blocking)
 // Returns 0 on success, <0 on disconnect or error.
-int esph_run_step(esph_session_t *s);
+int esph_send_ping_request(esph_session_t *s);
+int esph_run_step(esph_session_t *s, int timeout_ms);
 
 #ifdef __cplusplus
 }

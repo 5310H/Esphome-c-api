@@ -89,3 +89,28 @@ int esph_transport_recv(int sock, uint8_t *buf, int maxlen) {
     return total_recvd;
 }
 
+int esph_transport_wait_readable(int sock, int timeout_ms) {
+    if (sock < 0) return -1;
+    
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(sock, &read_fds);
+    
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    
+    int ret = select(sock + 1, &read_fds, NULL, NULL, &tv);
+    if (ret < 0) {
+        perror("[TRANSPORT] select");
+        return -1;
+    } else if (ret == 0) {
+        return 0; // timeout
+    }
+    
+    if (FD_ISSET(sock, &read_fds)) {
+        return 1; // readable
+    }
+    return 0;
+}
+

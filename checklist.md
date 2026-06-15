@@ -3,10 +3,10 @@
 This checklist outlines the remaining features required to transform the working protocol proof-of-concept into a fully robust, usable toolset.
 
 ## Core Connectivity & Stability
-- [ ] **Implement Non-Blocking Event Loop**
+- [x] **Implement Non-Blocking Event Loop**
   - Switch from blocking `recv()` calls to a `select()`-based network loop.
   - Allow the client to asynchronously listen for state changes without freezing the main thread.
-- [ ] **Implement Ping/Pong Keep-Alive**
+- [x] **Implement Ping/Pong Keep-Alive**
   - Add a timer to send a `PingRequest` (msg_type 7) to the ESPHome device every 15-30 seconds.
   - Track timestamps of received `PingResponse`s to detect disconnected/unresponsive devices and safely tear down the connection.
 

@@ -4,6 +4,16 @@
 
 #ifdef _WIN32
 #include <windows.h>
+uint64_t get_time_ms() {
+    return GetTickCount64();
+}
+#else
+#include <time.h>
+uint64_t get_time_ms() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
 #endif
 
 
@@ -46,11 +56,22 @@ int main(int argc, char *argv[]) {
     printf("\nEntering event loop. Waiting for state changes...\n");
     printf("Press Ctrl+C to exit.\n\n");
     fflush(stdout);
+    
+    uint64_t last_ping = get_time_ms();
+    
     while (1) {
-        if (esph_run_step(s) != 0) {
+        if (esph_run_step(s, 50) < 0) { // 50ms timeout
             printf("\nDisconnected or error in run loop. Exiting.\n");
             break;
         }
+        
+        uint64_t now = get_time_ms();
+        if (now - last_ping > 15000) { // 15 seconds
+            printf("[CLIENT] Sending PingRequest (Keep-Alive)...\n");
+            esph_send_ping_request(s);
+            last_ping = now;
+        }
+        
         fflush(stdout);
     }
 

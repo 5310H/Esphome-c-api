@@ -121,3 +121,8 @@ int esph_frame_recv(esph_session_t *s, uint32_t *type,
     fprintf(stderr, "\n");
     return 0;
 }
+
+int esph_frame_wait_readable(esph_session_t *s, int timeout_ms) {
+    return esph_transport_wait_readable(s->sock, timeout_ms);
+}
+

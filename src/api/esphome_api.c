@@ -27,6 +27,7 @@ struct esph_session {
 // From frame.c
 int esph_frame_send(esph_session_t *s, const uint8_t *plaintext, size_t plen);
 int esph_frame_recv(esph_session_t *s, uint32_t *type, uint8_t *out, size_t *out_len);
+int esph_frame_wait_readable(esph_session_t *s, int timeout_ms);
 
 
 
@@ -233,8 +234,12 @@ int esph_set_switch(esph_session_t *s, const char *entity_id, int state)
 // ---------------------------------------------------------------------------
 // Run loop step
 // ---------------------------------------------------------------------------
-int esph_run_step(esph_session_t *s)
+int esph_run_step(esph_session_t *s, int timeout_ms)
 {
+    int ret = esph_frame_wait_readable(s, timeout_ms);
+    if (ret < 0) return -1;
+    if (ret == 0) return 0; // Timeout, no data to process
+
     uint8_t buf[2048];
     size_t len = sizeof(buf);
     uint32_t msg_type = 0;
@@ -248,6 +253,7 @@ int esph_run_step(esph_session_t *s)
     if (msg_type == 7) { // PingRequest
         return esph_send_ping_response(s);
     } else if (msg_type == 8) { // PingResponse
+        printf("[API] Received PingResponse\n");
         return 0; // Handled
     } else if (msg_type == 5) { // DisconnectRequest
         return -1;

@@ -37,6 +37,9 @@ int esph_transport_send(int sock, const uint8_t *buf, int len);
  */
 int esph_transport_recv(int sock, uint8_t *buf, int maxlen);
 
+// Waits for the socket to become readable. Returns 1 if readable, 0 on timeout, -1 on error.
+int esph_transport_wait_readable(int sock, int timeout_ms);
+
 #ifdef __cplusplus
 }
 #endif
