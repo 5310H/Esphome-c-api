@@ -60,7 +60,7 @@ esph_session_t *esph_connect(const char *host, uint16_t port, const char *psk)
         return NULL;
     }
 
-    // 1. TCP connect
+    // 1. TCP connect: Establishes a raw TCP socket connection to the ESPHome device (typically port 6053).
     s->sock = esph_transport_connect(host, port);
     if (s->sock < 0) {
         fprintf(stderr, "[API] TCP connect failed\n");
@@ -77,7 +77,9 @@ esph_session_t *esph_connect(const char *host, uint16_t port, const char *psk)
             return NULL;
         }
 
-        // 3. Noise handshake
+        // 3. Noise handshake: This performs the 'Noise_NNpsk0_25519_ChaChaPoly_SHA256' cryptographic
+        // handshake required by modern ESPHome firmware (v1.14+). It sets up the shared symmetric keys
+        // used to encrypt all future frames in this session.
         if (esph_noise_handshake(s->noise, s->sock) != 0) {
             fprintf(stderr, "[API] Noise handshake failed\n");
             esph_disconnect(s);
@@ -87,7 +89,8 @@ esph_session_t *esph_connect(const char *host, uint16_t port, const char *psk)
     }
 
 
-    // 4. Send HelloRequest
+    // 4. Send HelloRequest: The first unencrypted (but noise-secured) packet sent to the device.
+    // It identifies the client (e.g. "esphome-c-api") and tells the device the protocol version we speak.
     if (esph_send_hello(s) != 0) {
         fprintf(stderr, "[API] HelloRequest failed\n");
         esph_disconnect(s);
@@ -95,7 +98,8 @@ esph_session_t *esph_connect(const char *host, uint16_t port, const char *psk)
         return NULL;
     }
 
-    // 5. Receive HelloResponse
+    // 5. Receive HelloResponse: We must wait for the device to acknowledge our HelloRequest
+    // before we can send any further commands or subscribe to states.
     {
         uint8_t buf[512];
         size_t len = sizeof(buf);
@@ -250,9 +254,13 @@ static bool decode_string_cb(pb_istream_t *stream, const pb_field_t *field, void
  */
 int esph_run_step(esph_session_t *s, int timeout_ms)
 {
+    // Wait for the socket to become readable.
+    // If timeout_ms is 0, this instantly checks and returns.
+    // If timeout_ms is > 0, it blocks up to that many milliseconds.
     int ret = esph_frame_wait_readable(s, timeout_ms);
-    if (ret < 0) return -1;
-    if (ret == 0) return 0; // Timeout, no data to process
+    if (ret < 0) return -1; // Socket error or disconnected
+    if (ret == 0) return 0; // Timeout reached, no data arrived in this step
+
 
     uint8_t buf[2048];
     size_t len = sizeof(buf);
@@ -261,10 +269,13 @@ int esph_run_step(esph_session_t *s, int timeout_ms)
     extern void esph_registry_add(const char *object_id, uint32_t key, uint32_t legacy_type);
     extern void esph_registry_update_state(uint32_t key, const char *state_str);
 
+    // Read the next complete frame from the socket.
+    // esph_frame_recv handles reading the 3-byte header, reading the payload, and decrypting it using the Noise context.
     if (esph_frame_recv(s, &msg_type, buf, &len) != 0) {
         return -1;
     }
 
+    // Initialize a Nanopb stream to decode the decrypted protobuf payload.
     pb_istream_t stream = pb_istream_from_buffer(buf, len);
 
     if (msg_type == 7) { // PingRequest
@@ -282,8 +293,10 @@ int esph_run_step(esph_session_t *s, int timeout_ms)
         msg.object_id.arg = object_id;
         msg.name.funcs.decode = decode_string_cb;
         msg.name.arg = entity_name;
+        // The decode_string_cb callback automatically extracts variable-length string fields from the payload.
         if (pb_decode(&stream, ListEntitiesBinarySensorResponse_fields, &msg)) {
-            // printf("[API] Found BinarySensor: object_id='%s', name='%s' (key=%u)\n", object_id, entity_name, msg.key);
+            // Register the entity dynamically. If the `object_id` (the short name like "smart_plug_status")
+            // is missing, we fall back to using the `name` field (the friendly name like "Smart Plug Status").
             esph_registry_add(object_id[0] ? object_id : entity_name, msg.key, msg_type);
         } else {
             fprintf(stderr, "[ERROR] Decode failed for type %u: %s\n", msg_type, PB_GET_ERROR(&stream));
@@ -297,7 +310,7 @@ int esph_run_step(esph_session_t *s, int timeout_ms)
         msg.name.funcs.decode = decode_string_cb;
         msg.name.arg = entity_name;
         if (pb_decode(&stream, ListEntitiesSwitchResponse_fields, &msg)) {
-            // printf("[API] Found Switch: object_id='%s', name='%s' (key=%u)\n", object_id, entity_name, msg.key);
+            // Register the entity, allowing us to send commands to it later by referencing its string name.
             esph_registry_add(object_id[0] ? object_id : entity_name, msg.key, msg_type);
         } else {
             fprintf(stderr, "[ERROR] Decode failed for type %u: %s\n", msg_type, PB_GET_ERROR(&stream));
@@ -331,11 +344,13 @@ int esph_run_step(esph_session_t *s, int timeout_ms)
             fprintf(stderr, "[ERROR] Decode failed for type %u: %s\n", msg_type, PB_GET_ERROR(&stream));
         }
     } else if (msg_type == ESPH_MSG_LIST_ENTITIES_DONE_RESPONSE) {
-        // printf("[API] ListEntities iteration complete.\n");
+        // This message signifies that the device has finished transmitting the full list of available entities.
         s->list_entities_done = true;
     } else if (msg_type == 21) { // BinarySensorStateResponse
+        // The device pushed a state update for a binary sensor.
         BinarySensorStateResponse msg = BinarySensorStateResponse_init_zero;
         if (pb_decode(&stream, BinarySensorStateResponse_fields, &msg)) {
+            // Save the newly received state ("ON" or "OFF") into the global registry cache.
             esph_registry_update_state(msg.key, msg.state ? "ON" : "OFF");
         } else {
             fprintf(stderr, "[ERROR] Decode failed for type 21: %s\n", PB_GET_ERROR(&stream));

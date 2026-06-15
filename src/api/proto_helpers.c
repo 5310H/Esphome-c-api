@@ -22,33 +22,41 @@ int esph_frame_recv(esph_session_t *s, uint32_t *type, uint8_t *out, size_t *out
  * @param payload The encoded protobuf payload
  * @param plen    Length of the payload
  * @return 0 on success, <0 on failure
+ * Helper function: Encodes a given Nanopb message struct into a byte buffer 
+ * and sends it over the active session as an encrypted frame.
+ *
+ * @param s         The active ESPHome session (holds the socket and encryption context)
+ * @param type      The numeric ID of the message type (e.g. 1 for HelloRequest)
+ * @param fields    The Nanopb fields descriptor array for this message type
+ * @param msg       A pointer to the actual message struct to encode
+ * @return 0 on success, <0 on failure
  */
-static int send_frame(esph_session_t *s, uint32_t type,
-                      const uint8_t *payload, size_t plen)
+static int send_frame(esph_session_t *s, uint32_t type, const pb_msgdesc_t *fields, const void *msg)
 {
     uint8_t buf[1024];
-    // For Noise protocol, the inner header is 2 bytes type (big-endian), 2 bytes length (big-endian)
-    buf[0] = (type >> 8) & 0xFF;
-    buf[1] = type & 0xFF;
+
+    // Initialize the Nanopb output stream pointing into our buffer.
+    // We reserve the first 4 bytes for the plaintext preamble and length.
+    pb_ostream_t stream = pb_ostream_from_buffer(buf + 4, sizeof(buf) - 4);
+    
+    // Encode the struct into the protobuf binary format
+    if (!pb_encode(&stream, fields, msg)) {
+        return -1;
+    }
+    
+    size_t plen = stream.bytes_written;
+
+    // The Native API protocol requires a 4-byte unencrypted preamble inside the plaintext 
+    // payload BEFORE encryption.
+    // Byte 0: `0x00`
+    // Byte 1: The message type (varint encoded, assuming < 128 for simple messages)
+    // Byte 2 & 3: The length of the protobuf payload (big-endian)
+    buf[0] = 0x00;
+    buf[1] = type & 0xFF; // Simplification: assuming type < 128
     buf[2] = (plen >> 8) & 0xFF;
     buf[3] = plen & 0xFF;
 
-    if (4 + plen > sizeof(buf)) {
-        // fprintf(stderr, "[PROTO] Frame too large\n");
-        return -1;
-    }
-
-    memcpy(buf + 4, payload, plen);
-    size_t frame_len = 4 + plen;
-
-    // fprintf(stderr, "[PROTO] Sending frame type=%u, payload_len=%zu\n", type, plen);
-    // fprintf(stderr, "[PROTO] Hex: ");
-    // for (size_t i = 0; i < frame_len; i++) {
-    //     fprintf(stderr, "%02x ", buf[i]);
-    // }
-    // fprintf(stderr, "\n");
-
-    return esph_frame_send(s, buf, frame_len);
+    return esph_frame_send(s, buf, 4 + plen);
 }
 
 // ---------------------------------------------------------------------------
@@ -65,21 +73,13 @@ static bool encode_string_cb(pb_ostream_t *stream, const pb_field_t *field, void
 
 int esph_send_hello(esph_session_t *s)
 {
-    uint8_t buf[256];
-    pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
-
     HelloRequest msg = HelloRequest_init_zero;
     msg.client_info.funcs.encode = encode_string_cb;
     msg.client_info.arg = "esphome-c-api";
     msg.api_version_major = 1;
     msg.api_version_minor = 14;
 
-    if (!pb_encode(&stream, HelloRequest_fields, &msg)) {
-        fprintf(stderr, "[PROTO] HelloRequest encode failed\n");
-        return -1;
-    }
-
-    return send_frame(s, 1 /*HelloRequest*/, buf, stream.bytes_written);
+    return send_frame(s, 1, HelloRequest_fields, &msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -92,18 +92,8 @@ int esph_send_hello(esph_session_t *s)
 // ---------------------------------------------------------------------------
 int esph_send_device_info_request(esph_session_t *s)
 {
-    uint8_t buf[32];
-    pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
-
-    DeviceInfoRequest msg =
-        DeviceInfoRequest_init_zero;
-
-    if (!pb_encode(&stream, DeviceInfoRequest_fields, &msg)) {
-        fprintf(stderr, "[PROTO] DeviceInfoRequest encode failed\n");
-        return -1;
-    }
-
-    return send_frame(s, 9 /*DeviceInfoRequest*/, buf, stream.bytes_written);
+    DeviceInfoRequest msg = DeviceInfoRequest_init_zero;
+    return send_frame(s, 9, DeviceInfoRequest_fields, &msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -111,17 +101,8 @@ int esph_send_device_info_request(esph_session_t *s)
 // ---------------------------------------------------------------------------
 int esph_send_list_entities(esph_session_t *s)
 {
-    uint8_t buf[32];
-    pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
-
     ListEntitiesRequest msg = ListEntitiesRequest_init_zero;
-
-    if (!pb_encode(&stream, ListEntitiesRequest_fields, &msg)) {
-        fprintf(stderr, "[PROTO] ListEntitiesRequest encode failed\n");
-        return -1;
-    }
-
-    return send_frame(s, 11 /*ListEntitiesRequest*/, buf, stream.bytes_written);
+    return send_frame(s, 11, ListEntitiesRequest_fields, &msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -129,18 +110,8 @@ int esph_send_list_entities(esph_session_t *s)
 // ---------------------------------------------------------------------------
 int esph_send_subscribe_states(esph_session_t *s)
 {
-    uint8_t buf[64];
-    pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
-
-    SubscribeStatesRequest msg =
-        SubscribeStatesRequest_init_zero;
-
-    if (!pb_encode(&stream, SubscribeStatesRequest_fields, &msg)) {
-        fprintf(stderr, "[PROTO] SubscribeStates encode failed\n");
-        return -1;
-    }
-
-    return send_frame(s, 20 /*SubscribeStatesRequest*/, buf, stream.bytes_written);
+    SubscribeStatesRequest msg = SubscribeStatesRequest_init_zero;
+    return send_frame(s, 20, SubscribeStatesRequest_fields, &msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -156,21 +127,12 @@ int esph_send_subscribe_states(esph_session_t *s)
  */
 int esph_send_switch_command(esph_session_t *s, uint32_t key, int state)
 {
-    uint8_t buf[32];
-    pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
-
-    SwitchCommandRequest msg =
-        SwitchCommandRequest_init_zero;
+    SwitchCommandRequest msg = SwitchCommandRequest_init_zero;
     
     msg.key = key;
     msg.state = state ? true : false;
 
-    if (!pb_encode(&stream, SwitchCommandRequest_fields, &msg)) {
-        fprintf(stderr, "[PROTO] SwitchCommand encode failed\n");
-        return -1;
-    }
-
-    return send_frame(s, 33 /*SwitchCommandRequest*/, buf, stream.bytes_written);
+    return send_frame(s, 33, SwitchCommandRequest_fields, &msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -178,18 +140,15 @@ int esph_send_switch_command(esph_session_t *s, uint32_t key, int state)
 // ---------------------------------------------------------------------------
 int esph_send_ping_request(esph_session_t *s)
 {
-    uint8_t buf[16];
-    pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
     PingRequest msg = PingRequest_init_zero;
-    if (!pb_encode(&stream, PingRequest_fields, &msg)) return -1;
-    return send_frame(s, 7 /*PingRequest*/, buf, stream.bytes_written);
+    return send_frame(s, 7, PingRequest_fields, &msg);
 }
 
+// ---------------------------------------------------------------------------
+// PingResponse (Sent in response to PingRequest from server)
+// ---------------------------------------------------------------------------
 int esph_send_ping_response(esph_session_t *s)
 {
-    uint8_t buf[16];
-    pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
     PingResponse msg = PingResponse_init_zero;
-    if (!pb_encode(&stream, PingResponse_fields, &msg)) return -1;
-    return send_frame(s, 8 /*PingResponse*/, buf, stream.bytes_written);
+    return send_frame(s, 8, PingResponse_fields, &msg);
 }
