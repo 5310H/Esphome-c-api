@@ -24,6 +24,18 @@ void esph_noise_free(esph_noise_ctx_t *ctx) {
     free(ctx);
 }
 
+// ---------------------------------------------------------------------------
+// Noise Initialization
+// ---------------------------------------------------------------------------
+/**
+ * Initializes the Noise-C cryptographic context for a new session.
+ * Decodes the base64 pre-shared key (PSK) and instantiates the specific 
+ * handshake pattern required by ESPHome: `Noise_NNpsk0_25519_ChaChaPoly_SHA256`.
+ *
+ * @param out_ctx Pointer to store the newly created context
+ * @param psk_b64 Base64-encoded PSK from the user
+ * @return 0 on success, -1 on error
+ */
 int esph_noise_init(esph_noise_ctx_t **out_ctx, const char *psk_b64) {
     if (noise_init() != NOISE_ERROR_NONE) {
         NOISE_LOGI("Failed to initialize noise-c library");
@@ -57,15 +69,7 @@ int esph_noise_init(esph_noise_ctx_t **out_ctx, const char *psk_b64) {
     err = noise_handshakestate_set_prologue(ctx->handshake, ESPH_NOISE_PROLOGUE, 14);
     if (err != NOISE_ERROR_NONE) goto error;
 
-    // Base64 decode the PSK
-    uint8_t psk_bytes[32] = {
-        0xf7,0x79,0x50,0xf3,0x17,0xb2,0x17,0x5e,
-        0x76,0xfe,0xa0,0xc5,0x10,0xe9,0xe0,0xb1,
-        0x22,0x9,0xef,0x80,0x6b,0x35,0x12,0x4e,
-        0xbd,0x73,0xd5,0xb3,0xcc,0x8d,0x38,0x84
-    };
-
-    err = noise_handshakestate_set_pre_shared_key(ctx->handshake, psk_bytes, 32);
+    err = noise_handshakestate_set_pre_shared_key(ctx->handshake, psk, 32);
     if (err != NOISE_ERROR_NONE) goto error;
 
     err = noise_handshakestate_start(ctx->handshake);
@@ -79,6 +83,20 @@ error:
     return -1;
 }
 
+// ---------------------------------------------------------------------------
+// Noise Handshake Execution
+// ---------------------------------------------------------------------------
+/**
+ * Drives the interactive Noise handshake over the TCP socket.
+ * This function builds the initial encrypted `e` message, sends it,
+ * and waits for the server to reply with its half of the handshake.
+ * If successful, it splits the handshake state into persistent 
+ * Send and Receive cipher states.
+ *
+ * @param ctx  The noise context
+ * @param sock The active TCP socket
+ * @return 0 on success, -1 on handshake failure
+ */
 int esph_noise_handshake(esph_noise_ctx_t *ctx, int sock) {
     uint8_t payload_buf[1024];
     NoiseBuffer mbuf;
@@ -92,11 +110,13 @@ int esph_noise_handshake(esph_noise_ctx_t *ctx, int sock) {
         return -1;
     }
 
-    // ESPHome framing: 0x01, len_hi, len_lo, 0x00, msg
+    // ESPHome framing requires a 3-byte plaintext header (0x01 = encrypted, + 2 bytes length).
+    // The inner encrypted payload contains an extra 0x00 indicator byte at the beginning.
     uint16_t frame_len = mbuf.size + 1; // +1 for the 0x00 indicator
-    uint8_t out_frame[3 + 3 + 1 + 1024]; // +3 for Client Hello
+    uint8_t out_frame[3 + 3 + 1 + 1024]; // Buffer large enough for the full transmission
     
-    // Client Hello (empty frame)
+    // Send a completely empty "Client Hello" frame before the Noise message
+    // This empty 0x01 0x00 0x00 frame acts as a ping to wake up the ESPHome Noise listener.
     out_frame[0] = 0x01;
     out_frame[1] = 0x00;
     out_frame[2] = 0x00;

@@ -23,6 +23,18 @@
 #include <sys/types.h>
 #endif
 
+// ---------------------------------------------------------------------------
+// TCP Socket Connection Abstraction
+// ---------------------------------------------------------------------------
+/**
+ * Opens a raw TCP socket connection to the target ESPHome node.
+ * This function abstracts away the platform-specific socket initialization
+ * (e.g., WSAStartup on Windows) and performs DNS resolution via getaddrinfo.
+ *
+ * @param host IP address or hostname of the device
+ * @param port TCP port (typically 6053 for ESPHome Native API)
+ * @return The active socket descriptor, or -1 on error
+ */
 int esph_transport_connect(const char *host, uint16_t port) {
 #ifdef _WIN32
     static int wsa_init = 0;
@@ -70,6 +82,19 @@ int esph_transport_connect(const char *host, uint16_t port) {
     return sock;
 }
 
+// ---------------------------------------------------------------------------
+// TCP Blocking Send
+// ---------------------------------------------------------------------------
+/**
+ * Synchronously sends an exact number of bytes over the active socket.
+ * If the OS socket buffer fills up, this will loop and block until all 
+ * `len` bytes have been pushed to the network stack.
+ *
+ * @param sock The active socket descriptor
+ * @param buf  Pointer to the data to send
+ * @param len  Exact number of bytes to send
+ * @return The total bytes sent (equal to len), or -1 on network error
+ */
 int esph_transport_send(int sock, const uint8_t *buf, int len) {
     int total_sent = 0;
     while (total_sent < len) {
@@ -83,6 +108,20 @@ int esph_transport_send(int sock, const uint8_t *buf, int len) {
     return total_sent;
 }
 
+// ---------------------------------------------------------------------------
+// TCP Blocking Receive
+// ---------------------------------------------------------------------------
+/**
+ * Synchronously receives an exact number of bytes from the socket.
+ * This will loop and block until exactly `maxlen` bytes have been 
+ * received. This is critical because ESPHome sends the 3-byte frame header,
+ * and we MUST read exactly the ciphertext length specified in that header.
+ *
+ * @param sock   The active socket descriptor
+ * @param buf    Pointer to the destination buffer
+ * @param maxlen Exact number of bytes to read
+ * @return The total bytes received (equal to maxlen), or -1 on network error/disconnect
+ */
 int esph_transport_recv(int sock, uint8_t *buf, int maxlen) {
     int total_recvd = 0;
     while (total_recvd < maxlen) {
@@ -96,6 +135,19 @@ int esph_transport_recv(int sock, uint8_t *buf, int maxlen) {
     return total_recvd;
 }
 
+// ---------------------------------------------------------------------------
+// Socket Polling
+// ---------------------------------------------------------------------------
+/**
+ * Polls the socket to see if there is any data waiting to be read.
+ * This allows the main `esph_run_step` loop to be non-blocking (or block
+ * for a specific timeout) so the application can do other work (like sending
+ * pings or updating UI) while waiting for network packets.
+ *
+ * @param sock       The active socket descriptor
+ * @param timeout_ms Maximum time to wait in milliseconds
+ * @return 1 if data is available, 0 if timeout expired, -1 on error
+ */
 int esph_transport_wait_readable(int sock, int timeout_ms) {
     if (sock < 0) return -1;
     

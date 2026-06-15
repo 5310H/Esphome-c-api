@@ -49,6 +49,14 @@ void esph_registry_add(const char *object_id, uint32_t key, uint32_t legacy_type
 // ---------------------------------------------------------------------------
 // Update entity state
 // ---------------------------------------------------------------------------
+/**
+ * Updates the cached string representation of an entity's current state.
+ * This is called automatically by `esph_run_step` whenever a StateResponse
+ * (like SensorStateResponse or SwitchStateResponse) is received.
+ *
+ * @param key       The 32-bit numeric key of the entity to update
+ * @param state_str The new state as a formatted string (e.g. "ON", "23.50")
+ */
 void esph_registry_update_state(uint32_t key, const char *state_str)
 {
     for (size_t i = 0; i < registry_count; i++) {

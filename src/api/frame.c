@@ -24,7 +24,9 @@ int esph_frame_send(esph_session_t *s,
     uint8_t encbuf[2048];
     size_t enc_len = sizeof(encbuf);
 
-    // Encrypt using Noise transport key
+    // 1. Encrypt the plaintext payload using the Noise transport session.
+    // The plaintext actually includes the 4-byte unencrypted preamble (0x00, type, length)
+    // which was prepended by proto_helpers.c, but to the Noise layer, it's all just data to encrypt.
     if (esph_noise_encrypt(s->noise,
                            plaintext, plen,
                            encbuf, &enc_len) != 0) {
@@ -32,15 +34,17 @@ int esph_frame_send(esph_session_t *s,
         return -1;
     }
 
-    // Prefix with 2‑byte big‑endian length
+    // 2. Prefix the encrypted payload with a 3-byte plaintext framing header.
+    // The ESPHome v1.14+ API requires this specific frame header to indicate
+    // an encrypted frame, followed by the length of the ciphertext.
     uint8_t hdr[3];
-    hdr[0] = 0x01;
-    hdr[1] = (enc_len >> 8) & 0xFF;
-    hdr[2] = (enc_len >> 0) & 0xFF;
+    hdr[0] = 0x01; // 0x01 indicates an encrypted frame (0x00 was used for plaintext)
+    hdr[1] = (enc_len >> 8) & 0xFF; // Ciphertext length (Big-Endian, High byte)
+    hdr[2] = (enc_len >> 0) & 0xFF; // Ciphertext length (Big-Endian, Low byte)
 
     // fprintf(stderr, "[FRAME] Sending encrypted frame (hdr: %02x %02x %02x, enc_len: %zu)\n", hdr[0], hdr[1], hdr[2], enc_len);
 
-    // Send header
+    // 3. Send the 3-byte header over the wire
     if (esph_transport_send(s->sock, hdr, 3) != 3) {
         fprintf(stderr, "[FRAME] send header failed\n");
         return -1;
@@ -63,7 +67,8 @@ int esph_frame_recv(esph_session_t *s, uint32_t *type,
 {
     uint8_t hdr[3];
 
-    // Read 3-byte header (1 byte indicator, 2-byte length)
+    // 1. Read the 3-byte framing header from the socket.
+    // This tells us if it's encrypted and exactly how many bytes to read next.
     int r = esph_transport_recv(s->sock, hdr, 3);
     if (r != 3) {
         fprintf(stderr, "[FRAME] recv header failed\n");
@@ -82,7 +87,8 @@ int esph_frame_recv(esph_session_t *s, uint32_t *type,
 
     uint8_t encbuf[2048];
 
-    // Read encrypted payload
+    // 2. Read the full encrypted payload from the socket.
+    // The transport read loop guarantees we read exactly enc_len bytes before returning.
     r = esph_transport_recv(s->sock, encbuf, enc_len);
     if (r != (int)enc_len) {
         fprintf(stderr, "[FRAME] recv payload failed\n");
@@ -102,15 +108,18 @@ int esph_frame_recv(esph_session_t *s, uint32_t *type,
         return -1;
     }
 
-    *type = ((uint32_t)out[0] << 8) | out[1];
-    size_t payload_len = ((size_t)out[2] << 8) | out[3];
+    // 4. Extract the message type and payload length from the unencrypted preamble.
+    // The preamble structure is: [0x00] [Msg Type] [Length High] [Length Low]
+    *type = ((uint32_t)out[0] << 8) | out[1]; // Typically out[0] is 0x00, out[1] is the type
+    size_t payload_len = ((size_t)out[2] << 8) | out[3]; // Big-Endian length of the protobuf payload
 
     if (payload_len + 4 != *out_len) {
         fprintf(stderr, "[FRAME] payload length mismatch\n");
         return -1;
     }
 
-    // shift payload to the beginning of out buffer
+    // 5. Shift the protobuf payload to the beginning of the output buffer.
+    // We overwrite the 4-byte preamble so the caller only sees the pure protobuf binary.
     memmove(out, out + 4, payload_len);
     *out_len = payload_len;
 
