@@ -6,10 +6,14 @@
 
 #define MAX_ENTITIES 64
 
+/**
+ * Represents a single entity mapping retrieved from the ESPHome device.
+ * Used to translate friendly string IDs into the 32-bit keys required by the protocol.
+ */
 typedef struct {
-    uint32_t key;
-    char object_id[64];
-    uint32_t legacy_type;
+    uint32_t key;           // The 32-bit numeric key assigned by the ESPHome device
+    char object_id[64];     // The human-readable string ID or name of the entity
+    uint32_t legacy_type;   // The ESPH_MSG_* type ID (e.g. ESPH_MSG_LIST_ENTITIES_SWITCH_RESPONSE)
 } entity_entry_t;
 
 static entity_entry_t registry[MAX_ENTITIES];
@@ -18,23 +22,38 @@ static size_t registry_count = 0;
 // ---------------------------------------------------------------------------
 // Store entity info
 // ---------------------------------------------------------------------------
-void esph_registry_add(const esphome_api_EntityInfo *info)
+/**
+ * Add a new entity to the internal registry.
+ * This is called automatically during the esph_wait_list_entities_done loop.
+ *
+ * @param object_id   The string ID or name of the entity
+ * @param key         The numeric key assigned by the device
+ * @param legacy_type The protobuf message type ID that defined this entity
+ */
+void esph_registry_add(const char *object_id, uint32_t key, uint32_t legacy_type)
 {
     if (registry_count >= MAX_ENTITIES)
         return;
 
-    registry[registry_count].key = info->key;
+    registry[registry_count].key = key;
     strncpy(registry[registry_count].object_id,
-            info->object_id,
+            object_id,
             sizeof(registry[registry_count].object_id)-1);
-    registry[registry_count].legacy_type = info->legacy_type;
+    registry[registry_count].legacy_type = legacy_type;
 
     registry_count++;
 }
 
 // ---------------------------------------------------------------------------
-// Lookup key by entity_id (e.g. "switch.lamp")
+// Lookup key by entity_id
 // ---------------------------------------------------------------------------
+/**
+ * Lookup the numeric key for a given entity string ID.
+ * This is required to send commands (like SwitchCommandRequest) to the device.
+ *
+ * @param entity_id The string ID or name of the entity
+ * @return The 32-bit numeric key, or 0 if not found
+ */
 uint32_t esph_registry_lookup_key(const char *entity_id)
 {
     // entity_id format: "switch.lamp"

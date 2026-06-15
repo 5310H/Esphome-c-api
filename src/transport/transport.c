@@ -4,11 +4,18 @@
 #include <string.h>
 #include <errno.h>
 
-#ifdef _WIN32
+#if defined(ESP_PLATFORM) || defined(ESP8266)
+// ESP-IDF / ESP8266 RTOS SDK using LwIP
+#include <lwip/sockets.h>
+#include <lwip/netdb.h>
+#include <unistd.h>
+#elif defined(_WIN32)
+// Windows
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #define close closesocket
 #else
+// Standard POSIX (Linux, macOS, etc.)
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netdb.h>

@@ -19,63 +19,63 @@ service APIConnection {
   rpc device_info (DeviceInfoRequest) returns (DeviceInfoResponse) {
     option (needs_authentication) = false;
   }
-  rpc list_entities (ListEntitiesRequest) returns (ApiVoid) {}
-  rpc subscribe_states (SubscribeStatesRequest) returns (ApiVoid) {}
-  rpc subscribe_logs (SubscribeLogsRequest) returns (ApiVoid) {}
-  rpc subscribe_homeassistant_services (SubscribeHomeassistantServicesRequest) returns (ApiVoid) {}
-  rpc subscribe_home_assistant_states (SubscribeHomeAssistantStatesRequest) returns (ApiVoid) {}
-  rpc execute_service (ExecuteServiceRequest) returns (ApiVoid) {}
+  rpc list_entities (ListEntitiesRequest) returns (void) {}
+  rpc subscribe_states (SubscribeStatesRequest) returns (void) {}
+  rpc subscribe_logs (SubscribeLogsRequest) returns (void) {}
+  rpc subscribe_homeassistant_services (SubscribeHomeassistantServicesRequest) returns (void) {}
+  rpc subscribe_home_assistant_states (SubscribeHomeAssistantStatesRequest) returns (void) {}
+  rpc execute_service (ExecuteServiceRequest) returns (void) {}
   rpc noise_encryption_set_key (NoiseEncryptionSetKeyRequest) returns (NoiseEncryptionSetKeyResponse) {}
 
-  rpc button_command (ButtonCommandRequest) returns (ApiVoid) {}
-  rpc camera_image (CameraImageRequest) returns (ApiVoid) {}
-  rpc climate_command (ClimateCommandRequest) returns (ApiVoid) {}
-  rpc cover_command (CoverCommandRequest) returns (ApiVoid) {}
-  rpc date_command (DateCommandRequest) returns (ApiVoid) {}
-  rpc datetime_command (DateTimeCommandRequest) returns (ApiVoid) {}
-  rpc fan_command (FanCommandRequest) returns (ApiVoid) {}
-  rpc light_command (LightCommandRequest) returns (ApiVoid) {}
-  rpc lock_command (LockCommandRequest) returns (ApiVoid) {}
-  rpc media_player_command (MediaPlayerCommandRequest) returns (ApiVoid) {}
-  rpc number_command (NumberCommandRequest) returns (ApiVoid) {}
-  rpc select_command (SelectCommandRequest) returns (ApiVoid) {}
-  rpc siren_command (SirenCommandRequest) returns (ApiVoid) {}
-  rpc switch_command (SwitchCommandRequest) returns (ApiVoid) {}
-  rpc text_command (TextCommandRequest) returns (ApiVoid) {}
-  rpc time_command (TimeCommandRequest) returns (ApiVoid) {}
-  rpc update_command (UpdateCommandRequest) returns (ApiVoid) {}
-  rpc valve_command (ValveCommandRequest) returns (ApiVoid) {}
-  rpc water_heater_command (WaterHeaterCommandRequest) returns (ApiVoid) {}
+  rpc button_command (ButtonCommandRequest) returns (void) {}
+  rpc camera_image (CameraImageRequest) returns (void) {}
+  rpc climate_command (ClimateCommandRequest) returns (void) {}
+  rpc cover_command (CoverCommandRequest) returns (void) {}
+  rpc date_command (DateCommandRequest) returns (void) {}
+  rpc datetime_command (DateTimeCommandRequest) returns (void) {}
+  rpc fan_command (FanCommandRequest) returns (void) {}
+  rpc light_command (LightCommandRequest) returns (void) {}
+  rpc lock_command (LockCommandRequest) returns (void) {}
+  rpc media_player_command (MediaPlayerCommandRequest) returns (void) {}
+  rpc number_command (NumberCommandRequest) returns (void) {}
+  rpc select_command (SelectCommandRequest) returns (void) {}
+  rpc siren_command (SirenCommandRequest) returns (void) {}
+  rpc switch_command (SwitchCommandRequest) returns (void) {}
+  rpc text_command (TextCommandRequest) returns (void) {}
+  rpc time_command (TimeCommandRequest) returns (void) {}
+  rpc update_command (UpdateCommandRequest) returns (void) {}
+  rpc valve_command (ValveCommandRequest) returns (void) {}
+  rpc water_heater_command (WaterHeaterCommandRequest) returns (void) {}
 
-  rpc subscribe_bluetooth_le_advertisements(SubscribeBluetoothLEAdvertisementsRequest) returns (ApiVoid) {}
-  rpc bluetooth_device_request(BluetoothDeviceRequest) returns (ApiVoid) {}
-  rpc bluetooth_gatt_get_services(BluetoothGATTGetServicesRequest) returns (ApiVoid) {}
-  rpc bluetooth_gatt_read(BluetoothGATTReadRequest) returns (ApiVoid) {}
-  rpc bluetooth_gatt_write(BluetoothGATTWriteRequest) returns (ApiVoid) {}
-  rpc bluetooth_gatt_read_descriptor(BluetoothGATTReadDescriptorRequest) returns (ApiVoid) {}
-  rpc bluetooth_gatt_write_descriptor(BluetoothGATTWriteDescriptorRequest) returns (ApiVoid) {}
-  rpc bluetooth_gatt_notify(BluetoothGATTNotifyRequest) returns (ApiVoid) {}
+  rpc subscribe_bluetooth_le_advertisements(SubscribeBluetoothLEAdvertisementsRequest) returns (void) {}
+  rpc bluetooth_device_request(BluetoothDeviceRequest) returns (void) {}
+  rpc bluetooth_gatt_get_services(BluetoothGATTGetServicesRequest) returns (void) {}
+  rpc bluetooth_gatt_read(BluetoothGATTReadRequest) returns (void) {}
+  rpc bluetooth_gatt_write(BluetoothGATTWriteRequest) returns (void) {}
+  rpc bluetooth_gatt_read_descriptor(BluetoothGATTReadDescriptorRequest) returns (void) {}
+  rpc bluetooth_gatt_write_descriptor(BluetoothGATTWriteDescriptorRequest) returns (void) {}
+  rpc bluetooth_gatt_notify(BluetoothGATTNotifyRequest) returns (void) {}
   rpc subscribe_bluetooth_connections_free(SubscribeBluetoothConnectionsFreeRequest) returns (BluetoothConnectionsFreeResponse) {}
-  rpc unsubscribe_bluetooth_le_advertisements(UnsubscribeBluetoothLEAdvertisementsRequest) returns (ApiVoid) {}
-  rpc bluetooth_scanner_set_mode(BluetoothScannerSetModeRequest) returns (ApiVoid) {}
+  rpc unsubscribe_bluetooth_le_advertisements(UnsubscribeBluetoothLEAdvertisementsRequest) returns (void) {}
+  rpc bluetooth_scanner_set_mode(BluetoothScannerSetModeRequest) returns (void) {}
   rpc bluetooth_set_connection_params(BluetoothSetConnectionParamsRequest) returns (BluetoothSetConnectionParamsResponse) {}
 
-  rpc subscribe_voice_assistant(SubscribeVoiceAssistantRequest) returns (ApiVoid) {}
+  rpc subscribe_voice_assistant(SubscribeVoiceAssistantRequest) returns (void) {}
   rpc voice_assistant_get_configuration(VoiceAssistantConfigurationRequest) returns (VoiceAssistantConfigurationResponse) {}
-  rpc voice_assistant_set_configuration(VoiceAssistantSetConfiguration) returns (ApiVoid) {}
+  rpc voice_assistant_set_configuration(VoiceAssistantSetConfiguration) returns (void) {}
 
-  rpc alarm_control_panel_command (AlarmControlPanelCommandRequest) returns (ApiVoid) {}
+  rpc alarm_control_panel_command (AlarmControlPanelCommandRequest) returns (void) {}
 
-  rpc zwave_proxy_frame(ZWaveProxyFrame) returns (ApiVoid) {}
-  rpc zwave_proxy_request(ZWaveProxyRequest) returns (ApiVoid) {}
+  rpc zwave_proxy_frame(ZWaveProxyFrame) returns (void) {}
+  rpc zwave_proxy_request(ZWaveProxyRequest) returns (void) {}
 
-  rpc infrared_rf_transmit_raw_timings(InfraredRFTransmitRawTimingsRequest) returns (ApiVoid) {}
+  rpc infrared_rf_transmit_raw_timings(InfraredRFTransmitRawTimingsRequest) returns (void) {}
 
-  rpc serial_proxy_configure(SerialProxyConfigureRequest) returns (ApiVoid) {}
-  rpc serial_proxy_write(SerialProxyWriteRequest) returns (ApiVoid) {}
-  rpc serial_proxy_set_modem_pins(SerialProxySetModemPinsRequest) returns (ApiVoid) {}
-  rpc serial_proxy_get_modem_pins(SerialProxyGetModemPinsRequest) returns (ApiVoid) {}
-  rpc serial_proxy_request(SerialProxyRequest) returns (ApiVoid) {}
+  rpc serial_proxy_configure(SerialProxyConfigureRequest) returns (void) {}
+  rpc serial_proxy_write(SerialProxyWriteRequest) returns (void) {}
+  rpc serial_proxy_set_modem_pins(SerialProxySetModemPinsRequest) returns (void) {}
+  rpc serial_proxy_get_modem_pins(SerialProxyGetModemPinsRequest) returns (void) {}
+  rpc serial_proxy_request(SerialProxyRequest) returns (void) {}
 }
 
 
@@ -776,7 +776,7 @@ message SubscribeLogsRequest {
 message SubscribeLogsResponse {
   option (id) = 29;
   option (source) = SOURCE_SERVER;
-  option (ApiLog) = false;
+  option (log) = false;
   option (no_delay) = false;
   option (speed_optimized) = true;
 
@@ -2732,8 +2732,4 @@ message BluetoothSetConnectionParamsResponse {
 
   uint64 address = 1;
   int32 error = 2;
-}
-message EncryptedMessage {
-  uint32 type = 1;
-  bytes data = 2;
 }

@@ -11,14 +11,14 @@ This checklist outlines the remaining features required to transform the working
   - Track timestamps of received `PingResponse`s to detect disconnected/unresponsive devices and safely tear down the connection.
 
 ## Data Processing & Management
-- [ ] **Implement String Parsing (Nanopb Callbacks)**
-  - Write custom C callbacks to handle dynamic-length strings in Protocol Buffers (e.g., `TextSensorStateResponse` strings).
+- [x] **Implement String Parsing (Nanopb Callbacks)**
+  - Use nanopb callback fields properly so `TextSensorStateResponse` reads the actual string, rather than logging empty strings., `TextSensorStateResponse` strings).
   - This resolves the issue where `TextSensor` states currently decode as blank fields.
-- [ ] **Implement Entity ID Mapping**
+- [x] **Implement Entity ID Mapping**
   - During the `ListEntities` phase, save a mapping of the human-readable entity IDs (like `smart_plug_28_switch`) to their dynamically assigned 32-bit `key`.
   - This allows users of the C API to interact with devices using friendly names rather than raw numeric keys.
 
 ## Command & Control
-- [ ] **Implement Command Sending**
+- [x] **Implement Command Sending**
   - Add API functions to actively send commands to the device (e.g., `esph_send_switch_command(s, "smart_plug_28_switch", true)`).
   - Construct and encrypt `SwitchCommandRequest`, `LightCommandRequest`, etc., and send them asynchronously over the open TCP socket.

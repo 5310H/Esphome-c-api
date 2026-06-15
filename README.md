@@ -6,41 +6,75 @@ A lightweight, C-based client for communicating with ESPHome devices over the ES
 
 This project is currently a working command-line proof of concept. We have successfully reverse-engineered and implemented the core ESPHome Native API protocol in C.
 
-### What has been accomplished so far:
+### What has been accomplished:
 
 1. **Project Infrastructure & Tooling**
    - Built a custom `Makefile` for compiling under MinGW/GCC on Windows.
    - Integrated **Nanopb** for lightweight Protocol Buffer encoding and decoding.
-   - Generated C structures for the ESPHome `api.proto` definitions, applying custom `.options` to handle variable-length string fields gracefully.
+   - Designed for cross-platform execution (ESP32/ESP8266 LwIP, Linux POSIX Sockets, Windows Winsock2).
 
 2. **Encryption & Security (Noise Protocol)**
    - Successfully integrated the **Noise-C** library.
-   - Implemented the `Noise_NNpsk0_25519_ChaChaPoly_SHA256` handshake sequence which ESPHome uses to secure the Native API connection.
+   - Implemented the `Noise_NNpsk0_25519_ChaChaPoly_SHA256` handshake sequence which ESPHome Native API >= 1.14+ requires.
    - Built the framing and encryption/decryption layers to handle ESPHome's custom payload structures (preamble `0x01`, 2-byte header, ciphertext payload).
 
 3. **API Protocol Implementation**
-   - **Handshake Phase:** Sending the prologue and exchanging Noise `e` messages to establish the symmetric session keys.
-   - **Hello & Connect Phase:** Sending `HelloRequest` and `ConnectRequest`, and parsing the device's `HelloResponse` and `ConnectResponse`.
+   - **Modern Protocol Update:** Fully adopted API 1.14+ specifications, removing deprecated `ConnectRequest` phases.
    - **Device Info:** Requesting and decoding `DeviceInfoResponse` (name, MAC address, ESPHome version, compilation time, model, etc.).
-   - **Entity Discovery:** Sending `ListEntitiesRequest` and successfully parsing the stream of `ListEntities*Response` messages to identify all configured sensors, switches, binary sensors, etc., on the device.
-   - **State Subscriptions:** Sending `SubscribeStatesRequest` and successfully decoding real-time state updates.
-   - **Bug Fixes:** Resolved complex decoding bugs, such as nanopb "wrong wire type" errors caused by mapping `fixed32` keys incorrectly.
-
-### Next Steps & Pending Work:
-
-- **Robust Async Receive Loop:** Currently, the event loop uses blocking socket `recv()` calls. We need to implement `select()` or non-blocking reads to handle asynchronous network events gracefully.
-- **Ping/Pong Keep-Alive:** The client must send a `PingRequest` every 15-30 seconds to prevent the ESPHome device from timing out and closing the connection.
-- **String Callbacks:** Implement Nanopb callbacks to properly decode and capture string values in state updates (e.g., `TextSensorStateResponse`).
-- **Command Sending:** Implement the API calls to actively toggle switches, change light colors, etc. (e.g., `SwitchCommandRequest`).
+   - **Entity Discovery & Registry:** Implemented dynamic tracking of devices during the `ListEntities` phase. Human-readable entity names are stored alongside their dynamically assigned 32-bit keys. Fallback logic automatically captures the `name` field if `object_id` is empty.
+   - **State Subscriptions:** Implemented Nanopb string callbacks (`decode_string_cb`) to properly decode and capture string values in state updates (e.g., `TextSensorStateResponse`).
+   - **Robust Async Receive Loop:** Implemented non-blocking `select()` based reads within the `esph_run_step` event loop.
+   - **Ping/Pong Keep-Alive:** Implemented automated periodic `PingRequest` dispatching to maintain persistent, long-running connections.
+   - **Command Sending:** Implemented full command sending routines like `esph_set_switch(session, "Switch Name", state)` that seamlessly resolve the string ID and securely dispatch a `SwitchCommandRequest` over the wire.
 
 ## Dependencies
 
 - **Nanopb** (included in source)
 - **Noise-C** (requires local compilation)
 - **mbedTLS** (used as the crypto backend for Noise-C)
-- **Winsock2** (for Windows networking)
+- **Winsock2** (for Windows networking) or **LwIP** (for ESP platforms)
 
-## Building and Running
+## Usage
+
+Using the C API is straightforward. See `examples/linux_client.c` for a complete example.
+
+```c
+#include "esphome_api.h"
+
+int main() {
+    // 1. Connect and automatically perform the Noise handshake
+    esph_session_t *s = esph_connect("192.168.69.136", 6053, "base64_encoded_psk_key_here=");
+    if (!s) return -1;
+
+    // 2. Fetch basic device info
+    esph_check_device_info(s);
+
+    // 3. Start Entity Discovery and wait for it to complete
+    esph_send_list_entities(s);
+    esph_wait_list_entities_done(s);
+
+    // 4. Subscribe to state changes (receives real-time sensor updates)
+    esph_subscribe_states(s);
+
+    // 5. Send Commands using Human-Readable Names
+    esph_set_switch(s, "Smart Plug 28 Switch", 1); // Turn ON
+
+    // 6. Enter the Event Loop
+    while (1) {
+        // Blocks for up to 50ms processing incoming state updates or pings
+        if (esph_run_step(s, 50) < 0) {
+            break; // Disconnected or Error
+        }
+        
+        // (Application Logic Here: e.g. ping keep-alives)
+    }
+
+    esph_disconnect(s);
+    return 0;
+}
+```
+
+## Building and Running (CLI Client)
 
 Ensure you have MinGW installed and the `noise-c` library built and accessible to the compiler.
 
@@ -51,5 +85,5 @@ mingw32-make
 
 Example:
 ```bash
-./real_esphome_client.exe 192.168.1.100 "base64_encoded_psk_key_here=" 6053
+./real_esphome_client.exe 192.168.1.100 "w4200oZ5WWe2T9aR3v+2K7A7P0q/Lw8E0Jb/c1fN/hQ=" 6053
 ```

@@ -58,6 +58,8 @@ int main(int argc, char *argv[]) {
     fflush(stdout);
     
     uint64_t last_ping = get_time_ms();
+    uint64_t last_toggle = get_time_ms();
+    int switch_state = 0;
     
     while (1) {
         if (esph_run_step(s, 50) < 0) { // 50ms timeout
@@ -70,6 +72,13 @@ int main(int argc, char *argv[]) {
             printf("[CLIENT] Sending PingRequest (Keep-Alive)...\n");
             esph_send_ping_request(s);
             last_ping = now;
+        }
+
+        if (now - last_toggle > 10000) { // 10 seconds
+            switch_state = !switch_state;
+            printf("[CLIENT] Toggling switch 'Smart Plug 28 Switch' to %s...\n", switch_state ? "ON" : "OFF");
+            esph_set_switch(s, "Smart Plug 28 Switch", switch_state);
+            last_toggle = now;
         }
         
         fflush(stdout);

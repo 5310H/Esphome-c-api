@@ -13,7 +13,16 @@ int esph_frame_send(esph_session_t *s, const uint8_t *plaintext, size_t plen);
 int esph_frame_recv(esph_session_t *s, uint32_t *type, uint8_t *out, size_t *out_len);
 
 
-// Internal helper: encode a frame and send it
+/**
+ * Internal helper to encode a frame, prepend the ESPHome unencrypted/inner header,
+ * and send it securely via the session.
+ *
+ * @param s       Active session
+ * @param type    The ESPH_MSG_* protobuf message type ID
+ * @param payload The encoded protobuf payload
+ * @param plen    Length of the payload
+ * @return 0 on success, <0 on failure
+ */
 static int send_frame(esph_session_t *s, uint32_t type,
                       const uint8_t *payload, size_t plen)
 {
@@ -45,15 +54,27 @@ static int send_frame(esph_session_t *s, uint32_t type,
 // ---------------------------------------------------------------------------
 // HelloRequest
 // ---------------------------------------------------------------------------
+/**
+ * Nanopb callback used to encode a string from a char pointer into a stream.
+ */
+static bool encode_string_cb(pb_ostream_t *stream, const pb_field_t *field, void * const *arg) {
+    const char *str = (const char *)*arg;
+    if (!pb_encode_tag_for_field(stream, field)) return false;
+    return pb_encode_string(stream, (uint8_t*)str, strlen(str));
+}
+
 int esph_send_hello(esph_session_t *s)
 {
     uint8_t buf[256];
     pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
 
-    esphome_api_HelloRequest msg = esphome_api_HelloRequest_init_zero;
-    strncpy(msg.client_info, "esphome-c-api", sizeof(msg.client_info)-1);
+    HelloRequest msg = HelloRequest_init_zero;
+    msg.client_info.funcs.encode = encode_string_cb;
+    msg.client_info.arg = "esphome-c-api";
+    msg.api_version_major = 1;
+    msg.api_version_minor = 14;
 
-    if (!pb_encode(&stream, esphome_api_HelloRequest_fields, &msg)) {
+    if (!pb_encode(&stream, HelloRequest_fields, &msg)) {
         fprintf(stderr, "[PROTO] HelloRequest encode failed\n");
         return -1;
     }
@@ -64,21 +85,7 @@ int esph_send_hello(esph_session_t *s)
 // ---------------------------------------------------------------------------
 // ConnectRequest
 // ---------------------------------------------------------------------------
-int esph_send_connect(esph_session_t *s, const char *password)
-{
-    uint8_t buf[256];
-    pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
-
-    esphome_api_ConnectRequest msg = esphome_api_ConnectRequest_init_zero;
-    strncpy(msg.password, password, sizeof(msg.password)-1);
-
-    if (!pb_encode(&stream, esphome_api_ConnectRequest_fields, &msg)) {
-        fprintf(stderr, "[PROTO] ConnectRequest encode failed\n");
-        return -1;
-    }
-
-    return send_frame(s, 3 /*ConnectRequest*/, buf, stream.bytes_written);
-}
+// ConnectRequest is deprecated in Noise protocol. We no longer send it.
 
 // ---------------------------------------------------------------------------
 // DeviceInfoRequest
@@ -88,10 +95,10 @@ int esph_send_device_info_request(esph_session_t *s)
     uint8_t buf[32];
     pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
 
-    esphome_api_DeviceInfoRequest msg =
-        esphome_api_DeviceInfoRequest_init_zero;
+    DeviceInfoRequest msg =
+        DeviceInfoRequest_init_zero;
 
-    if (!pb_encode(&stream, esphome_api_DeviceInfoRequest_fields, &msg)) {
+    if (!pb_encode(&stream, DeviceInfoRequest_fields, &msg)) {
         fprintf(stderr, "[PROTO] DeviceInfoRequest encode failed\n");
         return -1;
     }
@@ -107,9 +114,9 @@ int esph_send_list_entities(esph_session_t *s)
     uint8_t buf[32];
     pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
 
-    esphome_api_ListEntitiesRequest msg = esphome_api_ListEntitiesRequest_init_zero;
+    ListEntitiesRequest msg = ListEntitiesRequest_init_zero;
 
-    if (!pb_encode(&stream, esphome_api_ListEntitiesRequest_fields, &msg)) {
+    if (!pb_encode(&stream, ListEntitiesRequest_fields, &msg)) {
         fprintf(stderr, "[PROTO] ListEntitiesRequest encode failed\n");
         return -1;
     }
@@ -125,10 +132,10 @@ int esph_send_subscribe_states(esph_session_t *s)
     uint8_t buf[64];
     pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
 
-    esphome_api_SubscribeStatesRequest msg =
-        esphome_api_SubscribeStatesRequest_init_zero;
+    SubscribeStatesRequest msg =
+        SubscribeStatesRequest_init_zero;
 
-    if (!pb_encode(&stream, esphome_api_SubscribeStatesRequest_fields, &msg)) {
+    if (!pb_encode(&stream, SubscribeStatesRequest_fields, &msg)) {
         fprintf(stderr, "[PROTO] SubscribeStates encode failed\n");
         return -1;
     }
@@ -139,18 +146,26 @@ int esph_send_subscribe_states(esph_session_t *s)
 // ---------------------------------------------------------------------------
 // SwitchCommandRequest
 // ---------------------------------------------------------------------------
+/**
+ * Send a SwitchCommandRequest to change the state of a switch entity.
+ *
+ * @param s     Active session
+ * @param key   The numeric key of the entity to command
+ * @param state 1 to turn on, 0 to turn off
+ * @return 0 on success, <0 on failure
+ */
 int esph_send_switch_command(esph_session_t *s, uint32_t key, int state)
 {
-    uint8_t buf[128];
+    uint8_t buf[32];
     pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
 
-    esphome_api_SwitchCommandRequest msg =
-        esphome_api_SwitchCommandRequest_init_zero;
-
+    SwitchCommandRequest msg =
+        SwitchCommandRequest_init_zero;
+    
     msg.key = key;
     msg.state = state ? true : false;
 
-    if (!pb_encode(&stream, esphome_api_SwitchCommandRequest_fields, &msg)) {
+    if (!pb_encode(&stream, SwitchCommandRequest_fields, &msg)) {
         fprintf(stderr, "[PROTO] SwitchCommand encode failed\n");
         return -1;
     }
@@ -165,8 +180,8 @@ int esph_send_ping_request(esph_session_t *s)
 {
     uint8_t buf[16];
     pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
-    esphome_api_PingRequest msg = esphome_api_PingRequest_init_zero;
-    if (!pb_encode(&stream, esphome_api_PingRequest_fields, &msg)) return -1;
+    PingRequest msg = PingRequest_init_zero;
+    if (!pb_encode(&stream, PingRequest_fields, &msg)) return -1;
     return send_frame(s, 7 /*PingRequest*/, buf, stream.bytes_written);
 }
 
@@ -174,7 +189,7 @@ int esph_send_ping_response(esph_session_t *s)
 {
     uint8_t buf[16];
     pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
-    esphome_api_PingResponse msg = esphome_api_PingResponse_init_zero;
-    if (!pb_encode(&stream, esphome_api_PingResponse_fields, &msg)) return -1;
+    PingResponse msg = PingResponse_init_zero;
+    if (!pb_encode(&stream, PingResponse_fields, &msg)) return -1;
     return send_frame(s, 8 /*PingResponse*/, buf, stream.bytes_written);
 }
