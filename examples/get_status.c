@@ -39,14 +39,15 @@ int main(int argc, char **argv) {
     esph_subscribe_states(s);
 
     // Run the event loop for 2 seconds to allow state updates to stream in
-    printf("\nFetching current states...\n");
     for (int i = 0; i < 40; i++) { // 40 * 50ms = 2000ms
         if (esph_run_step(s, 50) < 0) {
             break;
         }
     }
 
-    printf("\nStatus check complete. Disconnecting...\n");
+    // Print the final summary of all entities and their states
+    esph_print_all_entities();
+
     esph_disconnect(s);
     return 0;
 }

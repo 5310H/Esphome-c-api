@@ -259,6 +259,7 @@ int esph_run_step(esph_session_t *s, int timeout_ms)
     uint32_t msg_type = 0;
 
     extern void esph_registry_add(const char *object_id, uint32_t key, uint32_t legacy_type);
+    extern void esph_registry_update_state(uint32_t key, const char *state_str);
 
     if (esph_frame_recv(s, &msg_type, buf, &len) != 0) {
         return -1;
@@ -282,7 +283,7 @@ int esph_run_step(esph_session_t *s, int timeout_ms)
         msg.name.funcs.decode = decode_string_cb;
         msg.name.arg = entity_name;
         if (pb_decode(&stream, ListEntitiesBinarySensorResponse_fields, &msg)) {
-            printf("[API] Found BinarySensor: object_id='%s', name='%s' (key=%u)\n", object_id, entity_name, msg.key);
+            // printf("[API] Found BinarySensor: object_id='%s', name='%s' (key=%u)\n", object_id, entity_name, msg.key);
             esph_registry_add(object_id[0] ? object_id : entity_name, msg.key, msg_type);
         } else {
             fprintf(stderr, "[ERROR] Decode failed for type %u: %s\n", msg_type, PB_GET_ERROR(&stream));
@@ -296,7 +297,7 @@ int esph_run_step(esph_session_t *s, int timeout_ms)
         msg.name.funcs.decode = decode_string_cb;
         msg.name.arg = entity_name;
         if (pb_decode(&stream, ListEntitiesSwitchResponse_fields, &msg)) {
-            printf("[API] Found Switch: object_id='%s', name='%s' (key=%u)\n", object_id, entity_name, msg.key);
+            // printf("[API] Found Switch: object_id='%s', name='%s' (key=%u)\n", object_id, entity_name, msg.key);
             esph_registry_add(object_id[0] ? object_id : entity_name, msg.key, msg_type);
         } else {
             fprintf(stderr, "[ERROR] Decode failed for type %u: %s\n", msg_type, PB_GET_ERROR(&stream));
@@ -310,7 +311,7 @@ int esph_run_step(esph_session_t *s, int timeout_ms)
         msg.name.funcs.decode = decode_string_cb;
         msg.name.arg = entity_name;
         if (pb_decode(&stream, ListEntitiesSensorResponse_fields, &msg)) {
-            printf("[API] Found Sensor: object_id='%s', name='%s' (key=%u)\n", object_id, entity_name, msg.key);
+            // printf("[API] Found Sensor: object_id='%s', name='%s' (key=%u)\n", object_id, entity_name, msg.key);
             esph_registry_add(object_id[0] ? object_id : entity_name, msg.key, msg_type);
         } else {
             fprintf(stderr, "[ERROR] Decode failed for type %u: %s\n", msg_type, PB_GET_ERROR(&stream));
@@ -324,35 +325,34 @@ int esph_run_step(esph_session_t *s, int timeout_ms)
         msg.name.funcs.decode = decode_string_cb;
         msg.name.arg = entity_name;
         if (pb_decode(&stream, ListEntitiesTextSensorResponse_fields, &msg)) {
-            printf("[API] Found TextSensor: object_id='%s', name='%s' (key=%u)\n", object_id, entity_name, msg.key);
+            // printf("[API] Found TextSensor: object_id='%s', name='%s' (key=%u)\n", object_id, entity_name, msg.key);
             esph_registry_add(object_id[0] ? object_id : entity_name, msg.key, msg_type);
         } else {
             fprintf(stderr, "[ERROR] Decode failed for type %u: %s\n", msg_type, PB_GET_ERROR(&stream));
         }
     } else if (msg_type == ESPH_MSG_LIST_ENTITIES_DONE_RESPONSE) {
-        printf("[API] ListEntities iteration complete.\n");
+        // printf("[API] ListEntities iteration complete.\n");
         s->list_entities_done = true;
     } else if (msg_type == 21) { // BinarySensorStateResponse
         BinarySensorStateResponse msg = BinarySensorStateResponse_init_zero;
         if (pb_decode(&stream, BinarySensorStateResponse_fields, &msg)) {
-            printf("[STATE] BinarySensor key=%u state=%s missing=%d\n", msg.key, msg.state ? "ON" : "OFF", msg.missing_state);
-            fflush(stdout);
+            esph_registry_update_state(msg.key, msg.state ? "ON" : "OFF");
         } else {
             fprintf(stderr, "[ERROR] Decode failed for type 21: %s\n", PB_GET_ERROR(&stream));
         }
     } else if (msg_type == 26) { // SwitchStateResponse
         SwitchStateResponse msg = SwitchStateResponse_init_zero;
         if (pb_decode(&stream, SwitchStateResponse_fields, &msg)) {
-            printf("[STATE] Switch key=%u state=%s\n", msg.key, msg.state ? "ON" : "OFF");
-            fflush(stdout);
+            esph_registry_update_state(msg.key, msg.state ? "ON" : "OFF");
         } else {
             fprintf(stderr, "[ERROR] Decode failed for type 26: %s\n", PB_GET_ERROR(&stream));
         }
     } else if (msg_type == 25) { // SensorStateResponse
         SensorStateResponse msg = SensorStateResponse_init_zero;
         if (pb_decode(&stream, SensorStateResponse_fields, &msg)) {
-            printf("[STATE] Sensor key=%u state=%.2f missing=%d\n", msg.key, msg.state, msg.missing_state);
-            fflush(stdout);
+            char val_buf[32];
+            snprintf(val_buf, sizeof(val_buf), "%.2f", msg.state);
+            esph_registry_update_state(msg.key, val_buf);
         } else {
             fprintf(stderr, "[ERROR] Decode failed for type 25: %s\n", PB_GET_ERROR(&stream));
         }
@@ -363,14 +363,12 @@ int esph_run_step(esph_session_t *s, int timeout_ms)
         msg.state.arg = text_buf;
         
         if (pb_decode(&stream, TextSensorStateResponse_fields, &msg)) {
-            printf("[STATE] TextSensor key=%u state=%s missing=%d\n", msg.key, text_buf, msg.missing_state);
-            fflush(stdout);
+            esph_registry_update_state(msg.key, text_buf);
         } else {
             fprintf(stderr, "[ERROR] Decode failed for type 27: %s\n", PB_GET_ERROR(&stream));
         }
     } else {
-        printf("[API] Unhandled message type: %u\n", msg_type);
-        fflush(stdout);
+        // Unhandled msg type
     }
 
     return 0;

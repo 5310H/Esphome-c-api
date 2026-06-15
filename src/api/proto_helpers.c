@@ -34,19 +34,19 @@ static int send_frame(esph_session_t *s, uint32_t type,
     buf[3] = plen & 0xFF;
 
     if (4 + plen > sizeof(buf)) {
-        fprintf(stderr, "[PROTO] Frame too large\n");
+        // fprintf(stderr, "[PROTO] Frame too large\n");
         return -1;
     }
 
     memcpy(buf + 4, payload, plen);
     size_t frame_len = 4 + plen;
 
-    fprintf(stderr, "[PROTO] Sending frame type=%u, payload_len=%zu\n", type, plen);
-    fprintf(stderr, "[PROTO] Hex: ");
-    for (size_t i = 0; i < frame_len; i++) {
-        fprintf(stderr, "%02x ", buf[i]);
-    }
-    fprintf(stderr, "\n");
+    // fprintf(stderr, "[PROTO] Sending frame type=%u, payload_len=%zu\n", type, plen);
+    // fprintf(stderr, "[PROTO] Hex: ");
+    // for (size_t i = 0; i < frame_len; i++) {
+    //     fprintf(stderr, "%02x ", buf[i]);
+    // }
+    // fprintf(stderr, "\n");
 
     return esph_frame_send(s, buf, frame_len);
 }

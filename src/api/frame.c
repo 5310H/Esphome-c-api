@@ -38,7 +38,7 @@ int esph_frame_send(esph_session_t *s,
     hdr[1] = (enc_len >> 8) & 0xFF;
     hdr[2] = (enc_len >> 0) & 0xFF;
 
-    fprintf(stderr, "[FRAME] Sending encrypted frame (hdr: %02x %02x %02x, enc_len: %zu)\n", hdr[0], hdr[1], hdr[2], enc_len);
+    // fprintf(stderr, "[FRAME] Sending encrypted frame (hdr: %02x %02x %02x, enc_len: %zu)\n", hdr[0], hdr[1], hdr[2], enc_len);
 
     // Send header
     if (esph_transport_send(s->sock, hdr, 3) != 3) {
@@ -114,11 +114,11 @@ int esph_frame_recv(esph_session_t *s, uint32_t *type,
     memmove(out, out + 4, payload_len);
     *out_len = payload_len;
 
-    fprintf(stderr, "[FRAME] Received msg_type=%u, len=%zu, hex: ", *type, payload_len);
-    for (size_t i = 0; i < payload_len; i++) {
-        fprintf(stderr, "%02x ", out[i]);
-    }
-    fprintf(stderr, "\n");
+    // fprintf(stderr, "[FRAME] Received msg_type=%u, len=%zu, hex: ", *type, payload_len);
+    // for (size_t i = 0; i < payload_len; i++) {
+    //     fprintf(stderr, "%02x ", out[i]);
+    // }
+    // fprintf(stderr, "\n");
     return 0;
 }
 

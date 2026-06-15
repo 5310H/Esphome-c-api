@@ -97,6 +97,11 @@ int esph_send_ping_request(esph_session_t *s);
  */
 int esph_run_step(esph_session_t *s, int timeout_ms);
 
+/**
+ * Print a cleanly formatted table of all discovered entities and their most recently received states.
+ */
+void esph_print_all_entities(void);
+
 #ifdef __cplusplus
 }
 #endif
