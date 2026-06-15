@@ -56,14 +56,16 @@ void esph_registry_add(const char *object_id, uint32_t key, uint32_t legacy_type
  */
 uint32_t esph_registry_lookup_key(const char *entity_id)
 {
-    // entity_id format: "switch.lamp"
+    // If entity_id has a dot (e.g. "switch.lamp"), skip the prefix.
+    // Otherwise, treat the entire string as the target name.
+    const char *target = entity_id;
     const char *dot = strchr(entity_id, '.');
-    if (!dot) return 0;
-
-    const char *object = dot + 1;
+    if (dot) {
+        target = dot + 1;
+    }
 
     for (size_t i = 0; i < registry_count; i++) {
-        if (strcmp(registry[i].object_id, object) == 0)
+        if (strcmp(registry[i].object_id, target) == 0)
             return registry[i].key;
     }
 

@@ -51,13 +51,21 @@ CLIENT_MAIN_SRCS = examples/linux_client.c
 CLIENT_MAIN_OBJS = $(CLIENT_MAIN_SRCS:.c=.o)
 
 TARGET = real_esphome_client
+STATUS_TARGET = get_status
 
-ALL_OBJS = $(CLIENT_MAIN_OBJS) $(API_OBJS) $(NOISE_OBJS) $(TRANSPORT_OBJS) $(PROTO_DIR)/pb_common.o $(PROTO_DIR)/pb_encode.o $(PROTO_DIR)/pb_decode.o
+COMMON_OBJS = $(API_OBJS) $(NOISE_OBJS) $(TRANSPORT_OBJS) $(PROTO_DIR)/pb_common.o $(PROTO_DIR)/pb_encode.o $(PROTO_DIR)/pb_decode.o
+ALL_OBJS = $(CLIENT_MAIN_OBJS) $(COMMON_OBJS)
 
-all: $(TARGET)
+all: $(TARGET) $(STATUS_TARGET)
 
 $(TARGET): $(ALL_OBJS)
 	$(CC) $(CFLAGS) $(ALL_OBJS) -o $(TARGET) $(LDFLAGS) $(LIBS)
+
+examples/get_status.o: examples/get_status.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(STATUS_TARGET): examples/get_status.o $(COMMON_OBJS)
+	$(CC) $(CFLAGS) examples/get_status.o $(COMMON_OBJS) -o $(STATUS_TARGET) $(LDFLAGS) $(LIBS)
 
 # Rule to generate Nanopb files from .proto files
 protos: $(PROTO_SRCS) $(PROTO_HDRS) # Ensure both .c and .h are targets for generation
@@ -79,7 +87,7 @@ update_metadata:
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f *.o src/*.o src/api/*.o src/noise/*.o src/transport/*.o examples/*.o $(TARGET)
+	rm -f *.o src/*.o src/api/*.o src/noise/*.o src/transport/*.o examples/*.o $(TARGET) $(STATUS_TARGET) $(STATUS_TARGET).exe
 
 run_client:
 	./$(TARGET) $(IP) $(PSK) $(PORT)
