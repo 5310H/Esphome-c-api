@@ -1,17 +1,18 @@
-cmake_minimum_required(VERSION 3.10)
-project(esphome_c_api C)
+cmake_minimum_required(VERSION 3.16)
 
-# Public headers
-include_directories(include)
-
-# Library sources (placeholders for now)
-add_library(esphome_c_api
-    src/noise/noise.c
-    src/transport/transport.c
-    src/protobuf/messages.c
-    src/api/esphome_api.c
+idf_component_register(
+    SRCS 
+        "src/api/esphome_api.c"
+        "src/api/frame.c"
+        "src/api/proto_helpers.c"
+        "src/noise/noise.c"
+        "src/proto/api.pb.c"
+        "src/proto/api_options.pb.c"
+        "src/proto/pb_common.c"
+        "src/proto/pb_decode.c"
+        "src/proto/pb_encode.c"
+        "src/protobuf/messages.c"
+        "src/transport/transport.c"
+    INCLUDE_DIRS "include" "src/proto"
+    REQUIRES lwip noise-c
 )
-
-# Example programs (optional)
-add_executable(linux_client examples/linux_client.c)
-target_link_libraries(linux_client esphome_c_api)

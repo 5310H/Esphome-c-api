@@ -14,7 +14,7 @@ class MQTTEventComponent : public mqtt::MQTTComponent {
  public:
   explicit MQTTEventComponent(event::Event *event);
 
-  void send_discovery(JsonObject root, mqtt::SendDiscoveryConfig &config) override;
+  void send_discovery(JsonObject root, mqtt::SendDiscoveryConfig storage_get_config()) override;
 
   void setup() override;
 

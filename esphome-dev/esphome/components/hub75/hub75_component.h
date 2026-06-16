@@ -19,7 +19,7 @@ using esphome::display::ColorOrder;
 class HUB75Display : public display::Display {
  public:
   // Constructor accepting config
-  explicit HUB75Display(const Hub75Config &config);
+  explicit HUB75Display(const Hub75Config storage_get_config());
 
   // Core Component methods
   void setup() override;

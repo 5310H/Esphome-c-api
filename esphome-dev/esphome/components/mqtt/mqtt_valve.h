@@ -15,7 +15,7 @@ class MQTTValveComponent : public mqtt::MQTTComponent {
   explicit MQTTValveComponent(valve::Valve *valve);
 
   void setup() override;
-  void send_discovery(JsonObject root, mqtt::SendDiscoveryConfig &config) override;
+  void send_discovery(JsonObject root, mqtt::SendDiscoveryConfig storage_get_config()) override;
 
   MQTT_COMPONENT_CUSTOM_TOPIC(position, command)
   MQTT_COMPONENT_CUSTOM_TOPIC(position, state)

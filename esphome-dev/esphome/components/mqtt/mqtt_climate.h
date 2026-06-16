@@ -13,7 +13,7 @@ namespace esphome::mqtt {
 class MQTTClimateComponent : public mqtt::MQTTComponent {
  public:
   MQTTClimateComponent(climate::Climate *device);
-  void send_discovery(JsonObject root, mqtt::SendDiscoveryConfig &config) override;
+  void send_discovery(JsonObject root, mqtt::SendDiscoveryConfig storage_get_config()) override;
   bool send_initial_state() override;
   const char *component_type() const override;
   void setup() override;

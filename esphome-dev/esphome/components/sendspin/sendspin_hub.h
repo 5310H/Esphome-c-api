@@ -141,7 +141,7 @@ class SendspinHub final : public Component,
 
 #ifdef USE_SENDSPIN_PLAYER
   void set_listener(sendspin::PlayerRoleListener *listener) { this->player_listener_ = listener; }
-  void set_player_config(const sendspin::PlayerRoleConfig &config) { this->player_config_ = config; }
+  void set_player_config(const sendspin::PlayerRoleConfig storage_get_config()) { this->player_config_ = config; }
 
   /// @brief Child components call this to get the PlayerRole instance after setup, so they can push updates to it.
   sendspin::PlayerRole *get_player_role();

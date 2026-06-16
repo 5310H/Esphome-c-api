@@ -1,10 +1,39 @@
 #include "esphome_noise.h"
 #include "esphome_transport.h"
 #include <noise/protocol.h>
-#include <mbedtls/base64.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+static int base64_decode(const char *input, unsigned char *output, size_t output_len) {
+    static const char *base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    int i, j, k = 0;
+    unsigned char char_array_4[4], char_array_3[3];
+    
+    for (i = 0, j = 0; input[i] != '\0' && input[i] != '='; i++) {
+        if (input[i] == ' ') continue;
+        
+        char_array_4[j++] = input[i];
+        if (j == 4) {
+            for (int m = 0; m < 4; m++) {
+                char *ptr = strchr(base64_chars, char_array_4[m]);
+                if (ptr) char_array_4[m] = ptr - base64_chars;
+                else char_array_4[m] = 0;
+            }
+            
+            char_array_3[0] = (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
+            char_array_3[1] = ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
+            char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
+            
+            for (int m = 0; m < 3 && k < output_len; m++) {
+                output[k++] = char_array_3[m];
+            }
+            j = 0;
+        }
+    }
+    
+    return k;
+}
 
 #define ESPH_NOISE_PROLOGUE "NoiseAPIInit\x00\x00"
 
@@ -47,14 +76,9 @@ int esph_noise_init(esph_noise_ctx_t **out_ctx, const char *psk_b64) {
 
     // Decode PSK
     uint8_t psk[32];
-    size_t psk_len = 0;
-    if (mbedtls_base64_decode(psk, sizeof(psk), &psk_len, (const unsigned char *)psk_b64, strlen(psk_b64)) != 0) {
-        NOISE_LOGI("Failed to base64 decode PSK");
-        free(ctx);
-        return -1;
-    }
+    int psk_len = base64_decode(psk_b64, psk, sizeof(psk));
     if (psk_len != 32) {
-        NOISE_LOGI("PSK must be 32 bytes");
+        NOISE_LOGI("PSK must be 32 bytes, got %d", psk_len);
         free(ctx);
         return -1;
     }

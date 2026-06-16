@@ -24,7 +24,7 @@ class MQTTNumberComponent : public mqtt::MQTTComponent {
   void setup() override;
   void dump_config() override;
 
-  void send_discovery(JsonObject root, mqtt::SendDiscoveryConfig &config) override;
+  void send_discovery(JsonObject root, mqtt::SendDiscoveryConfig storage_get_config()) override;
 
   bool send_initial_state() override;
 

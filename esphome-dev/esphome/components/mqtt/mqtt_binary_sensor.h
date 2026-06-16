@@ -21,7 +21,7 @@ class MQTTBinarySensorComponent : public mqtt::MQTTComponent {
 
   void dump_config() override;
 
-  void send_discovery(JsonObject root, mqtt::SendDiscoveryConfig &config) override;
+  void send_discovery(JsonObject root, mqtt::SendDiscoveryConfig storage_get_config()) override;
 
   void set_is_status(bool status);
 

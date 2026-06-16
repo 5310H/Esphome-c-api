@@ -15,7 +15,7 @@ class MQTTCoverComponent : public mqtt::MQTTComponent {
   explicit MQTTCoverComponent(cover::Cover *cover);
 
   void setup() override;
-  void send_discovery(JsonObject root, mqtt::SendDiscoveryConfig &config) override;
+  void send_discovery(JsonObject root, mqtt::SendDiscoveryConfig storage_get_config()) override;
 
   MQTT_COMPONENT_CUSTOM_TOPIC(position, command)
   MQTT_COMPONENT_CUSTOM_TOPIC(position, state)

@@ -225,7 +225,7 @@ class ThermostatClimate : public climate::Climate, public Component {
   /// Applies the temperature, mode, fan, and swing modes of the provided config.
   /// This is agnostic of custom vs built in preset
   /// Returns true if something was changed
-  bool change_preset_internal_(const ThermostatClimateTargetTempConfig &config);
+  bool change_preset_internal_(const ThermostatClimateTargetTempConfig storage_get_config());
 
   /// Return the traits of this controller.
   climate::ClimateTraits traits() override;
@@ -295,7 +295,7 @@ class ThermostatClimate : public climate::Climate, public Component {
   bool dehumidification_required_();
   bool humidification_required_();
 
-  void dump_preset_config_(const char *preset_name, const ThermostatClimateTargetTempConfig &config);
+  void dump_preset_config_(const char *preset_name, const ThermostatClimateTargetTempConfig storage_get_config());
 
   /// Minimum allowable duration in seconds for action timers
   const uint8_t min_timer_duration_{1};
