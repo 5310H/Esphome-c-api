@@ -1,24 +1,28 @@
 #include "esphome_noise.h"
 #include "esphome_transport.h"
 #include <noise/protocol.h>
+#include "internal.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 static int base64_decode(const char *input, unsigned char *output, size_t output_len) {
     static const char *base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    int i, j, k = 0;
+    int i = 0, j = 0, k = 0;
     unsigned char char_array_4[4], char_array_3[3];
     
-    for (i = 0, j = 0; input[i] != '\0' && input[i] != '='; i++) {
-        if (input[i] == ' ') continue;
+    while (input[i] != '\0' && input[i] != '\n' && input[i] != '\r') {
+        if (input[i] == ' ') { i++; continue; }
         
-        char_array_4[j++] = input[i];
+        char_array_4[j++] = input[i++];
         if (j == 4) {
             for (int m = 0; m < 4; m++) {
-                char *ptr = strchr(base64_chars, char_array_4[m]);
-                if (ptr) char_array_4[m] = ptr - base64_chars;
-                else char_array_4[m] = 0;
+                if (char_array_4[m] == '=') char_array_4[m] = 0;
+                else {
+                    char *ptr = strchr(base64_chars, char_array_4[m]);
+                    if (ptr) char_array_4[m] = ptr - base64_chars;
+                    else char_array_4[m] = 0;
+                }
             }
             
             char_array_3[0] = (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
@@ -26,6 +30,9 @@ static int base64_decode(const char *input, unsigned char *output, size_t output
             char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
             
             for (int m = 0; m < 3 && k < output_len; m++) {
+                // If it's the 3rd byte but the 3rd char was padding, skip it.
+                if (m == 1 && input[i - 2] == '=') break;
+                if (m == 2 && input[i - 1] == '=') break;
                 output[k++] = char_array_3[m];
             }
             j = 0;
@@ -89,6 +96,20 @@ int esph_noise_init(esph_noise_ctx_t **out_ctx, const char *psk_b64) {
         free(ctx);
         return -1;
     }
+
+    // [CRITICAL FIX]: ESPHome uses "Noise_NNpsk0_25519_ChaChaPoly_SHA256", 
+    // but noise-c only supports "NoisePSK_NN_25519_ChaChaPoly_SHA256".
+    // We must manually overwrite the initial Handshake Hash (h) and Chaining Key (ck)
+    // with the SHA256 of the correct protocol name, otherwise the MAC will fail!
+    uint8_t correct_hash[32] = {
+        0xf0, 0xb8, 0x90, 0x82, 0x6f, 0xb8, 0xe6, 0x58, 
+        0x4a, 0xf6, 0x94, 0x8d, 0x22, 0x71, 0x69, 0xc3, 
+        0x81, 0xc9, 0xed, 0x6a, 0x4c, 0x1c, 0x90, 0xdf, 
+        0x4b, 0x9f, 0xf4, 0x54, 0xfa, 0x94, 0x7f, 0x7b
+    };
+    struct NoiseHandshakeState_s *hs = (struct NoiseHandshakeState_s *)ctx->handshake;
+    memcpy(hs->symmetric->h, correct_hash, 32);
+    memcpy(hs->symmetric->ck, correct_hash, 32);
 
     err = noise_handshakestate_set_prologue(ctx->handshake, ESPH_NOISE_PROLOGUE, 14);
     if (err != NOISE_ERROR_NONE) goto error;
