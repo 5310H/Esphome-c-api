@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 
 idf_component_register(
     SRCS 
+        "src/api/entity_registry.c"
         "src/api/esphome_api.c"
         "src/api/frame.c"
         "src/api/proto_helpers.c"

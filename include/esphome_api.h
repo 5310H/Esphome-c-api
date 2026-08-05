@@ -8,6 +8,17 @@
 extern "C" {
 #endif
 
+/** Internal entity registry management */
+typedef struct entity_entry {
+    uint32_t key;
+    char object_id[64];
+    char state[64];
+    uint32_t legacy_type;
+} entity_entry_t;
+
+extern entity_entry_t registry[64];
+extern size_t registry_count;
+
 // Forward declaration of session context
 typedef struct esph_session esph_session_t;
 
@@ -101,6 +112,9 @@ int esph_run_step(esph_session_t *s, int timeout_ms);
  * Print a cleanly formatted table of all discovered entities and their most recently received states.
  */
 void esph_print_all_entities(void);
+
+void esph_registry_add(const char *object_id, uint32_t key, uint32_t legacy_type);
+void esph_registry_update_state(uint32_t key, const char *state_str);
 
 #ifdef __cplusplus
 }

@@ -6,19 +6,8 @@
 
 #define MAX_ENTITIES 64
 
-/**
- * Represents a single entity mapping retrieved from the ESPHome device.
- * Used to translate friendly string IDs into the 32-bit keys required by the protocol.
- */
-typedef struct {
-    uint32_t key;           // The 32-bit numeric key assigned by the ESPHome device
-    char object_id[64];     // The human-readable string ID or name of the entity
-    char state[64];         // The most recently received state string
-    uint32_t legacy_type;   // The ESPH_MSG_* type ID (e.g. ESPH_MSG_LIST_ENTITIES_SWITCH_RESPONSE)
-} entity_entry_t;
-
-static entity_entry_t registry[MAX_ENTITIES];
-static size_t registry_count = 0;
+entity_entry_t registry[MAX_ENTITIES];
+size_t registry_count = 0;
 
 // ---------------------------------------------------------------------------
 // Store entity info
