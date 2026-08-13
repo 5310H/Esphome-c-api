@@ -27,8 +27,10 @@ namespace esphome::ethernet {
 //
 // Must be called before esp_eth_mac_new_w5500(). The driver reads spi_host_id and spi_devcfg back
 // out of `config` in its init() callback, so `config` (and the spi_devcfg it points at) must stay
+// out of `w5500_config` in its init() callback, so `w5500_config` (and the spi_devcfg it points at) must stay
 // alive until esp_eth_mac_new_w5500() returns.
 void install_w5500_async_spi(eth_w5500_config_t storage_get_config());
+void install_w5500_async_spi(const eth_w5500_config_t &w5500_config);
 
 }  // namespace esphome::ethernet
 

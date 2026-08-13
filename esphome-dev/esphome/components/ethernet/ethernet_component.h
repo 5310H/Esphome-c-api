@@ -163,6 +163,7 @@ class EthernetComponent final : public Component {
   void set_mosi_pin(uint8_t mosi_pin);
   void set_cs_pin(uint8_t cs_pin);
   void set_interrupt_pin(uint8_t interrupt_pin);
+  void set_phy_addr_spi(int phy_addr);
   void set_reset_pin(uint8_t reset_pin);
   void set_clock_speed(int clock_speed);
   void set_interface(spi_host_device_t interface);

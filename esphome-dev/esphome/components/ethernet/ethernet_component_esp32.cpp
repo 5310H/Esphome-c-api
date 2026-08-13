@@ -815,6 +815,7 @@ void EthernetComponent::set_miso_pin(uint8_t miso_pin) { this->miso_pin_ = miso_
 void EthernetComponent::set_mosi_pin(uint8_t mosi_pin) { this->mosi_pin_ = mosi_pin; }
 void EthernetComponent::set_cs_pin(uint8_t cs_pin) { this->cs_pin_ = cs_pin; }
 void EthernetComponent::set_interrupt_pin(uint8_t interrupt_pin) { this->interrupt_pin_ = interrupt_pin; }
+void EthernetComponent::set_phy_addr_spi(int phy_addr) { this->phy_addr_spi_ = phy_addr; }
 void EthernetComponent::set_reset_pin(uint8_t reset_pin) { this->reset_pin_ = reset_pin; }
 void EthernetComponent::set_clock_speed(int clock_speed) { this->clock_speed_ = clock_speed; }
 void EthernetComponent::set_interface(spi_host_device_t interface) { this->interface_ = interface; }

@@ -60,7 +60,7 @@ int esph_transport_connect(const char *host, uint16_t port) {
 
     int err = getaddrinfo(host, port_str, &hints, &res);
     if (err != 0) {
-        fprintf(stderr, "[TRANSPORT] getaddrinfo failed: %s\n", gai_strerror(err));
+        fprintf(stderr, "[TRANSPORT] getaddrinfo failed: %d\n", err);
         return -1;
     }
 

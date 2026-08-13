@@ -687,7 +687,7 @@ async def to_code(config):
 
             # AMPDU settings optimized for PSRAM
             add_idf_sdkconfig_option("CONFIG_ESP_WIFI_AMPDU_TX_ENABLED", True)
-            add_idf_sdkconfig_option("CONFIG_ESP_WIFI_TX_BA_WIN", 16)
+            add_idf_sdkconfig_option("CONFIG_ESP_WIFI_TX_BA_WIN",2)
             add_idf_sdkconfig_option("CONFIG_ESP_WIFI_AMPDU_RX_ENABLED", True)
             add_idf_sdkconfig_option("CONFIG_ESP_WIFI_RX_BA_WIN", 32)
         else:
