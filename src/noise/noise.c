@@ -42,7 +42,11 @@ static int base64_decode(const char *input, unsigned char *output, size_t output
     return k;
 }
 
-#define ESPH_NOISE_PROLOGUE "NoiseAPIInit\x00\x00"
+/* ESPHome's Noise handshake prologue is exactly strlen("NoiseAPIInit") bytes.
+ * Appending NUL bytes changes the handshake hash and makes every encrypted
+ * ESPHome device reject the client before it can receive ListEntities. */
+#define ESPH_NOISE_PROLOGUE "NoiseAPIInit"
+#define ESPH_NOISE_PROLOGUE_LEN 12
 
 #define NOISE_LOGI(fmt, ...) printf("[NOISE] " fmt "\n", ##__VA_ARGS__)
 
@@ -111,7 +115,8 @@ int esph_noise_init(esph_noise_ctx_t **out_ctx, const char *psk_b64) {
     memcpy(hs->symmetric->h, correct_hash, 32);
     memcpy(hs->symmetric->ck, correct_hash, 32);
 
-    err = noise_handshakestate_set_prologue(ctx->handshake, ESPH_NOISE_PROLOGUE, 14);
+    err = noise_handshakestate_set_prologue(ctx->handshake, ESPH_NOISE_PROLOGUE,
+                                             ESPH_NOISE_PROLOGUE_LEN);
     if (err != NOISE_ERROR_NONE) goto error;
 
     err = noise_handshakestate_set_pre_shared_key(ctx->handshake, psk, 32);
@@ -146,41 +151,18 @@ int esph_noise_handshake(esph_noise_ctx_t *ctx, int sock) {
     uint8_t payload_buf[1024];
     NoiseBuffer mbuf;
 
-    // 1. Send e message
-    NOISE_LOGI("Writing -> e message");
-    noise_buffer_set_output(mbuf, payload_buf, sizeof(payload_buf));
-    int err = noise_handshakestate_write_message(ctx->handshake, &mbuf, NULL);
-    if (err != NOISE_ERROR_NONE) {
-        NOISE_LOGI("Failed to write handshake message e: %d", err);
+    // 1. Send Client Hello
+    uint8_t client_hello[3] = {0x01, 0x00, 0x00};
+    if (esph_transport_send(sock, client_hello, 3) < 0) {
+        NOISE_LOGI("Failed to send Client Hello");
         return -1;
     }
-
-    // ESPHome framing requires a 3-byte plaintext header (0x01 = encrypted, + 2 bytes length).
-    // The inner encrypted payload contains an extra 0x00 indicator byte at the beginning.
-    uint16_t frame_len = mbuf.size + 1; // +1 for the 0x00 indicator
-    uint8_t out_frame[3 + 3 + 1 + 1024]; // Buffer large enough for the full transmission
-    
-    // Send a completely empty "Client Hello" frame before the Noise message
-    // This empty 0x01 0x00 0x00 frame acts as a ping to wake up the ESPHome Noise listener.
-    out_frame[0] = 0x01;
-    out_frame[1] = 0x00;
-    out_frame[2] = 0x00;
-
-    // e message frame
-    out_frame[3] = 0x01;
-    out_frame[4] = (frame_len >> 8) & 0xFF;
-    out_frame[5] = frame_len & 0xFF;
-    out_frame[6] = 0x00; // Indicator
-    memcpy(out_frame + 7, mbuf.data, mbuf.size);
-
-    if (esph_transport_send(sock, out_frame, 7 + mbuf.size) < 0) {
-        return -1;
-    }
-    NOISE_LOGI("Sent -> e message (size %d)", (int)mbuf.size);
+    NOISE_LOGI("Sent -> Client Hello (0x01 0x00 0x00)");
 
     // 2. Receive Server Hello
     uint8_t hello_header[3];
     if (esph_transport_recv(sock, hello_header, 3) < 0) {
+        NOISE_LOGI("Failed to receive Server Hello header");
         return -1;
     }
     if (hello_header[0] != 0x01) {
@@ -192,12 +174,36 @@ int esph_noise_handshake(esph_noise_ctx_t *ctx, int sock) {
         uint8_t hello_body[1024];
         if (hello_len > sizeof(hello_body)) return -1;
         if (esph_transport_recv(sock, hello_body, hello_len) < 0) {
+            NOISE_LOGI("Failed to receive Server Hello body");
             return -1;
         }
         NOISE_LOGI("Received Server Hello (len %d)", hello_len);
     }
 
-    // 3. Receive Handshake Response
+    // 3. Send e message
+    NOISE_LOGI("Writing -> e message");
+    noise_buffer_set_output(mbuf, payload_buf, sizeof(payload_buf));
+    int err = noise_handshakestate_write_message(ctx->handshake, &mbuf, NULL);
+    if (err != NOISE_ERROR_NONE) {
+        NOISE_LOGI("Failed to write handshake message e: %d", err);
+        return -1;
+    }
+
+    uint16_t frame_len = mbuf.size + 1; // +1 for 0x00 indicator
+    uint8_t out_frame[3 + 1 + 1024];
+    out_frame[0] = 0x01;
+    out_frame[1] = (frame_len >> 8) & 0xFF;
+    out_frame[2] = frame_len & 0xFF;
+    out_frame[3] = 0x00; // Indicator
+    memcpy(out_frame + 4, mbuf.data, mbuf.size);
+
+    if (esph_transport_send(sock, out_frame, 4 + mbuf.size) < 0) {
+        NOISE_LOGI("Failed to send e message");
+        return -1;
+    }
+    NOISE_LOGI("Sent -> e message (size %d)", (int)mbuf.size);
+
+    // 4. Receive Handshake Response
     uint8_t header[3];
     if (esph_transport_recv(sock, header, 3) < 0) {
         return -1;

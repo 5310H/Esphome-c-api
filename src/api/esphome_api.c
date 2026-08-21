@@ -212,7 +212,9 @@ int esph_wait_list_entities_done(esph_session_t *s)
             return -1;
         }
     }
-    return 0;
+    // A read timeout is not a successful enumeration. Treat it as a failure
+    // so callers do not mistake a partial/empty registry for "no entities".
+    return s->list_entities_done ? 0 : -1;
 }
 
 // ---------------------------------------------------------------------------
