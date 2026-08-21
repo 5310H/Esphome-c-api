@@ -118,12 +118,12 @@ esph_session_t *esph_connect(const char *host, uint16_t port, const char *psk)
             free(s);
             return NULL;
         }
-        printf("[API] Received frame (type=%" PRIu32 ", len=%zu)\n", msg_type, len);
+        printf("[API] Received frame (type=%u, len=%zu)\n", (unsigned)msg_type, len);
 
         pb_istream_t stream = pb_istream_from_buffer(buf, len);
 
         if (msg_type != ESPH_MSG_HELLO_RESPONSE) {
-            fprintf(stderr, "[API] Step 5 FAILED: Expected HelloResponse (2), got type %" PRIu32 "\n", msg_type);
+            fprintf(stderr, "[API] Step 5 FAILED: Expected HelloResponse (2), got type %u\n", (unsigned)msg_type);
             esph_disconnect(s);
             free(s);
             return NULL;
@@ -136,8 +136,8 @@ esph_session_t *esph_connect(const char *host, uint16_t port, const char *psk)
             free(s);
             return NULL;
         }
-        printf("[API] Step 5 SUCCESS: Connected to ESPHome node (API version %" PRIu32 ".%" PRIu32 ")\n",
-               resp.api_version_major, resp.api_version_minor);
+        printf("[API] Step 5 SUCCESS: Connected to ESPHome node (API version %u.%u)\n",
+               (unsigned)resp.api_version_major, (unsigned)resp.api_version_minor);
     }
 
     return s;
@@ -180,7 +180,7 @@ int esph_check_device_info(esph_session_t *s)
     pb_istream_t stream = pb_istream_from_buffer(buf, len);
 
     if (msg_type != 10 /* ESPH_MSG_DEVICE_INFO_RESPONSE */) {
-        fprintf(stderr, "[API] Unexpected frame type %" PRIu32 ", expected 10\n", msg_type);
+        fprintf(stderr, "[API] Unexpected frame type %u, expected 10\n", (unsigned)msg_type);
         return -1;
     }
 
@@ -316,7 +316,7 @@ int esph_run_step(esph_session_t *s, int timeout_ms)
             // is missing, we fall back to using the `name` field (the friendly name like "Smart Plug Status").
             esph_registry_add(object_id[0] ? object_id : entity_name, msg.key, msg_type);
         } else {
-            fprintf(stderr, "[ERROR] Decode failed for type %" PRIu32 ": %s\n", msg_type, PB_GET_ERROR(&stream));
+            fprintf(stderr, "[ERROR] Decode failed for type %u: %s\n", (unsigned)msg_type, PB_GET_ERROR(&stream));
         }
     } else if (msg_type == ESPH_MSG_LIST_ENTITIES_SWITCH_RESPONSE) {
         ListEntitiesSwitchResponse msg = ListEntitiesSwitchResponse_init_zero;
@@ -330,7 +330,7 @@ int esph_run_step(esph_session_t *s, int timeout_ms)
             // Register the entity, allowing us to send commands to it later by referencing its string name.
             esph_registry_add(object_id[0] ? object_id : entity_name, msg.key, msg_type);
         } else {
-            fprintf(stderr, "[ERROR] Decode failed for type %" PRIu32 ": %s\n", msg_type, PB_GET_ERROR(&stream));
+            fprintf(stderr, "[ERROR] Decode failed for type %u: %s\n", (unsigned)msg_type, PB_GET_ERROR(&stream));
         }
     } else if (msg_type == ESPH_MSG_LIST_ENTITIES_SENSOR_RESPONSE) {
         ListEntitiesSensorResponse msg = ListEntitiesSensorResponse_init_zero;
@@ -344,7 +344,7 @@ int esph_run_step(esph_session_t *s, int timeout_ms)
             // printf("[API] Found Sensor: object_id='%s', name='%s' (key=%u)\n", object_id, entity_name, msg.key);
             esph_registry_add(object_id[0] ? object_id : entity_name, msg.key, msg_type);
         } else {
-            fprintf(stderr, "[ERROR] Decode failed for type %" PRIu32 ": %s\n", msg_type, PB_GET_ERROR(&stream));
+            fprintf(stderr, "[ERROR] Decode failed for type %u: %s\n", (unsigned)msg_type, PB_GET_ERROR(&stream));
         }
     } else if (msg_type == ESPH_MSG_LIST_ENTITIES_TEXT_SENSOR_RESPONSE) {
         ListEntitiesTextSensorResponse msg = ListEntitiesTextSensorResponse_init_zero;
@@ -358,7 +358,7 @@ int esph_run_step(esph_session_t *s, int timeout_ms)
             // printf("[API] Found TextSensor: object_id='%s', name='%s' (key=%u)\n", object_id, entity_name, msg.key);
             esph_registry_add(object_id[0] ? object_id : entity_name, msg.key, msg_type);
         } else {
-            fprintf(stderr, "[ERROR] Decode failed for type %" PRIu32 ": %s\n", msg_type, PB_GET_ERROR(&stream));
+            fprintf(stderr, "[ERROR] Decode failed for type %u: %s\n", (unsigned)msg_type, PB_GET_ERROR(&stream));
         }
     } else if (msg_type == ESPH_MSG_LIST_ENTITIES_DONE_RESPONSE) {
         // This message signifies that the device has finished transmitting the full list of available entities.
