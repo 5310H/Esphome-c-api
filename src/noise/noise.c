@@ -148,7 +148,7 @@ error:
  * @return 0 on success, -1 on handshake failure
  */
 int esph_noise_handshake(esph_noise_ctx_t *ctx, int sock) {
-    uint8_t payload_buf[1024];
+    uint8_t payload_buf[256];
     NoiseBuffer mbuf;
 
     // 1. Send Client Hello
@@ -171,7 +171,7 @@ int esph_noise_handshake(esph_noise_ctx_t *ctx, int sock) {
     }
     uint16_t hello_len = (hello_header[1] << 8) | hello_header[2];
     if (hello_len > 0) {
-        uint8_t hello_body[1024];
+        uint8_t hello_body[256];
         if (hello_len > sizeof(hello_body)) return -1;
         if (esph_transport_recv(sock, hello_body, hello_len) < 0) {
             NOISE_LOGI("Failed to receive Server Hello body");
@@ -190,7 +190,7 @@ int esph_noise_handshake(esph_noise_ctx_t *ctx, int sock) {
     }
 
     uint16_t frame_len = mbuf.size + 1; // +1 for 0x00 indicator
-    uint8_t out_frame[3 + 1 + 1024];
+    uint8_t out_frame[4 + 128];
     out_frame[0] = 0x01;
     out_frame[1] = (frame_len >> 8) & 0xFF;
     out_frame[2] = frame_len & 0xFF;
@@ -218,7 +218,7 @@ int esph_noise_handshake(esph_noise_ctx_t *ctx, int sock) {
         return -1;
     }
 
-    uint8_t in_frame[1024];
+    uint8_t in_frame[256];
     if (esph_transport_recv(sock, in_frame, in_len) < 0) {
         return -1;
     }

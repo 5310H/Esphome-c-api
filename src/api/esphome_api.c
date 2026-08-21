@@ -279,7 +279,7 @@ int esph_run_step(esph_session_t *s, int timeout_ms)
     if (ret == 0) return 0; // Timeout reached, no data arrived in this step
 
 
-    uint8_t buf[2048];
+    uint8_t buf[512];
     size_t len = sizeof(buf);
     uint32_t msg_type = 0;
 
