@@ -68,15 +68,17 @@ int esph_transport_connect(const char *host, uint16_t port) {
     char *slash = strchr(clean_host, '/');
     if (slash) *slash = '\0';
 
+    printf("[TRANSPORT] Resolving host '%s' (port %s)...\n", clean_host, port_str);
     int err = getaddrinfo(clean_host, port_str, &hints, &res);
     if (err != 0) {
-        fprintf(stderr, "[TRANSPORT] getaddrinfo failed for '%s': %d\n", clean_host, err);
+        fprintf(stderr, "[TRANSPORT] getaddrinfo failed for '%s': err=%d\n", clean_host, err);
         return -1;
     }
+    printf("[TRANSPORT] Host '%s' resolved successfully\n", clean_host);
 
     sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (sock < 0) {
-        perror("[TRANSPORT] socket");
+        perror("[TRANSPORT] socket creation failed");
         freeaddrinfo(res);
         return -1;
     }
@@ -87,13 +89,15 @@ int esph_transport_connect(const char *host, uint16_t port) {
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
 
+    printf("[TRANSPORT] Connecting TCP socket to %s:%s...\n", clean_host, port_str);
     if (connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
-        perror("[TRANSPORT] connect");
+        perror("[TRANSPORT] connect failed");
         close(sock);
         freeaddrinfo(res);
         return -1;
     }
 
+    printf("[TRANSPORT] TCP socket connected successfully (fd=%d)\n", sock);
     freeaddrinfo(res);
     return sock;
 }

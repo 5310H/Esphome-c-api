@@ -62,63 +62,68 @@ esph_session_t *esph_connect(const char *host, uint16_t port, const char *psk)
     }
 
     // 1. TCP connect: Establishes a raw TCP socket connection to the ESPHome device (typically port 6053).
+    printf("[API] Step 1: Connecting TCP to %s:%u...\n", host, (unsigned)port);
     s->sock = esph_transport_connect(host, port);
     if (s->sock < 0) {
-        fprintf(stderr, "[API] TCP connect failed\n");
+        fprintf(stderr, "[API] Step 1 FAILED: TCP connect to %s:%u failed\n", host, (unsigned)port);
         free(s);
         return NULL;
     }
+    printf("[API] Step 1 SUCCESS: TCP connected (sock=%d)\n", s->sock);
 
     if (psk && strlen(psk) > 0) {
         // 2. Noise init
+        printf("[API] Step 2: Initializing Noise crypto with PSK...\n");
         if (esph_noise_init(&s->noise, psk) != 0) {
-            fprintf(stderr, "[API] Noise init failed\n");
+            fprintf(stderr, "[API] Step 2 FAILED: Noise init failed (invalid PSK?)\n");
             close(s->sock);
             free(s);
             return NULL;
         }
+        printf("[API] Step 2 SUCCESS: Noise crypto initialized\n");
 
-        // 3. Noise handshake: This performs the 'Noise_NNpsk0_25519_ChaChaPoly_SHA256' cryptographic
-        // handshake required by modern ESPHome firmware (v1.14+). It sets up the shared symmetric keys
-        // used to encrypt all future frames in this session.
+        // 3. Noise handshake
+        printf("[API] Step 3: Executing Noise handshake with %s:%u...\n", host, (unsigned)port);
         if (esph_noise_handshake(s->noise, s->sock) != 0) {
-            fprintf(stderr, "[API] Noise handshake failed\n");
+            fprintf(stderr, "[API] Step 3 FAILED: Noise handshake rejected by %s:%u\n", host, (unsigned)port);
             esph_disconnect(s);
             free(s);
             return NULL;
         }
+        printf("[API] Step 3 SUCCESS: Noise handshake completed and ciphers active\n");
+    } else {
+        printf("[API] Skipping Noise (plaintext API mode)\n");
     }
 
-
-    // 4. Send HelloRequest: The first unencrypted (but noise-secured) packet sent to the device.
-    // It identifies the client (e.g. "esphome-c-api") and tells the device the protocol version we speak.
+    // 4. Send HelloRequest
+    printf("[API] Step 4: Sending HelloRequest to %s:%u...\n", host, (unsigned)port);
     if (esph_send_hello(s) != 0) {
-        fprintf(stderr, "[API] HelloRequest failed\n");
+        fprintf(stderr, "[API] Step 4 FAILED: HelloRequest send failed\n");
         esph_disconnect(s);
         free(s);
         return NULL;
     }
+    printf("[API] Step 4 SUCCESS: HelloRequest sent\n");
 
-    // 5. Receive HelloResponse: We must wait for the device to acknowledge our HelloRequest
-    // before we can send any further commands or subscribe to states.
+    // 5. Receive HelloResponse
+    printf("[API] Step 5: Waiting for HelloResponse from %s:%u...\n", host, (unsigned)port);
     {
         uint8_t buf[512];
         size_t len = sizeof(buf);
 
         uint32_t msg_type = 0;
-        printf("[API] Waiting for HelloResponse...\n"); fflush(stdout);
         if (esph_frame_recv(s, &msg_type, buf, &len) != 0) {
-            fprintf(stderr, "[API] HelloResponse recv failed\n"); fflush(stderr);
+            fprintf(stderr, "[API] Step 5 FAILED: HelloResponse receive failed\n");
             esph_disconnect(s);
             free(s);
             return NULL;
         }
-        printf("[API] Received HelloResponse\n"); fflush(stdout);
+        printf("[API] Received frame (type=%" PRIu32 ", len=%zu)\n", msg_type, len);
 
         pb_istream_t stream = pb_istream_from_buffer(buf, len);
 
         if (msg_type != ESPH_MSG_HELLO_RESPONSE) {
-            fprintf(stderr, "[API] Unexpected frame type %" PRIu32 "\n", msg_type);
+            fprintf(stderr, "[API] Step 5 FAILED: Expected HelloResponse (2), got type %" PRIu32 "\n", msg_type);
             esph_disconnect(s);
             free(s);
             return NULL;
@@ -126,11 +131,13 @@ esph_session_t *esph_connect(const char *host, uint16_t port, const char *psk)
 
         HelloResponse resp = HelloResponse_init_zero;
         if (!pb_decode(&stream, HelloResponse_fields, &resp)) {
-            fprintf(stderr, "[API] HelloResponse decode failed\n");
+            fprintf(stderr, "[API] Step 5 FAILED: HelloResponse decode failed\n");
             esph_disconnect(s);
             free(s);
             return NULL;
         }
+        printf("[API] Step 5 SUCCESS: Connected to ESPHome node (API version %" PRIu32 ".%" PRIu32 ")\n",
+               resp.api_version_major, resp.api_version_minor);
     }
 
     return s;
@@ -205,16 +212,21 @@ int esph_subscribe_states(esph_session_t *s)
 // ---------------------------------------------------------------------------
 int esph_wait_list_entities_done(esph_session_t *s)
 {
-    int max_steps = 20;
-    while (!s->list_entities_done && max_steps-- > 0) {
+    int max_steps = 25;
+    int step = 0;
+    while (!s->list_entities_done && step++ < max_steps) {
         int ret = esph_run_step(s, 150);
         if (ret < 0) {
+            fprintf(stderr, "[API] Error in esph_run_step during entity discovery (step %d)\n", step);
             return -1;
         }
     }
-    // A read timeout is not a successful enumeration. Treat it as a failure
-    // so callers do not mistake a partial/empty registry for "no entities".
-    return s->list_entities_done ? 0 : -1;
+    if (s->list_entities_done) {
+        printf("[API] Successfully received ListEntitiesDone marker\n");
+        return 0;
+    }
+    fprintf(stderr, "[API] Timeout: Did not receive ListEntitiesDone within %d ms\n", max_steps * 150);
+    return -1;
 }
 
 // ---------------------------------------------------------------------------
