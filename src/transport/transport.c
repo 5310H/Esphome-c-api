@@ -58,9 +58,19 @@ int esph_transport_connect(const char *host, uint16_t port) {
     char port_str[16];
     snprintf(port_str, sizeof(port_str), "%u", port);
 
-    int err = getaddrinfo(host, port_str, &hints, &res);
+    char clean_host[128] = {0};
+    const char *p = host ? host : "";
+    if (strncmp(p, "http://", 7) == 0) p += 7;
+    else if (strncmp(p, "https://", 8) == 0) p += 8;
+    strncpy(clean_host, p, sizeof(clean_host) - 1);
+    char *colon = strchr(clean_host, ':');
+    if (colon) *colon = '\0';
+    char *slash = strchr(clean_host, '/');
+    if (slash) *slash = '\0';
+
+    int err = getaddrinfo(clean_host, port_str, &hints, &res);
     if (err != 0) {
-        fprintf(stderr, "[TRANSPORT] getaddrinfo failed: %d\n", err);
+        fprintf(stderr, "[TRANSPORT] getaddrinfo failed for '%s': %d\n", clean_host, err);
         return -1;
     }
 
