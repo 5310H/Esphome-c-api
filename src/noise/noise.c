@@ -42,11 +42,10 @@ static int base64_decode(const char *input, unsigned char *output, size_t output
     return k;
 }
 
-/* ESPHome's Noise handshake prologue is exactly strlen("NoiseAPIInit") bytes.
- * Appending NUL bytes changes the handshake hash and makes every encrypted
- * ESPHome device reject the client before it can receive ListEntities. */
-#define ESPH_NOISE_PROLOGUE "NoiseAPIInit"
-#define ESPH_NOISE_PROLOGUE_LEN 12
+/* ESPHome's Noise handshake prologue is exactly 14 bytes:
+ * "NoiseAPIInit" (12 bytes) + 2 zero bytes (Client Hello frame size = 0x00 0x00). */
+#define ESPH_NOISE_PROLOGUE "NoiseAPIInit\0\0"
+#define ESPH_NOISE_PROLOGUE_LEN 14
 
 #define NOISE_LOGI(fmt, ...) printf("[NOISE] " fmt "\n", ##__VA_ARGS__)
 
