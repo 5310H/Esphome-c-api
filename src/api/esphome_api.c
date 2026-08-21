@@ -205,8 +205,10 @@ int esph_subscribe_states(esph_session_t *s)
 // ---------------------------------------------------------------------------
 int esph_wait_list_entities_done(esph_session_t *s)
 {
-    while (!s->list_entities_done) {
-        if (esph_run_step(s, 1000) < 0) {
+    int max_steps = 20;
+    while (!s->list_entities_done && max_steps-- > 0) {
+        int ret = esph_run_step(s, 150);
+        if (ret < 0) {
             return -1;
         }
     }

@@ -71,6 +71,12 @@ int esph_transport_connect(const char *host, uint16_t port) {
         return -1;
     }
 
+    struct timeval tv;
+    tv.tv_sec = 2;
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+
     if (connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
         perror("[TRANSPORT] connect");
         close(sock);

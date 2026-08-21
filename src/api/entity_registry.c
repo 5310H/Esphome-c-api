@@ -9,6 +9,12 @@
 entity_entry_t registry[MAX_ENTITIES];
 size_t registry_count = 0;
 
+void esph_registry_clear(void)
+{
+    registry_count = 0;
+    memset(registry, 0, sizeof(registry));
+}
+
 // ---------------------------------------------------------------------------
 // Store entity info
 // ---------------------------------------------------------------------------

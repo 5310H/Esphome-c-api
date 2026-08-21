@@ -69,6 +69,7 @@ int esph_send_list_entities(esph_session_t *s);
  * @return 0 on success, <0 on failure
  */
 int esph_wait_list_entities_done(esph_session_t *s);
+void esph_registry_clear(void);
 
 /**
  * Subscribe to state changes for all entities.
