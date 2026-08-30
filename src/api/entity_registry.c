@@ -4,9 +4,20 @@
 #include <string.h>
 #include <stdio.h>
 
+#ifdef ESP_PLATFORM
+#include "esp_attr.h"
+#endif
+
 #define MAX_ENTITIES 64
 
+#ifdef ESP_PLATFORM
+// Entity metadata is a cache used by the ESPHome integration.  Keep this
+// non-flash-I/O state in PSRAM, preserving internal DRAM for worker stacks
+// that must remain accessible during SPIFFS cache-disabled operations.
+EXT_RAM_BSS_ATTR entity_entry_t registry[MAX_ENTITIES];
+#else
 entity_entry_t registry[MAX_ENTITIES];
+#endif
 size_t registry_count = 0;
 
 void esph_registry_clear(void)
