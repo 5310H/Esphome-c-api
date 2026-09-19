@@ -91,6 +91,12 @@ int esph_subscribe_states(esph_session_t *s);
 int esph_set_switch(esph_session_t *s, const char *entity_id, int state);
 
 /**
+ * Send a switch command when Sentinel already stores the ESPHome numeric
+ * entity key (the normal virtual-relay mapping path).
+ */
+int esph_send_switch_command(esph_session_t *s, uint32_t key, int state);
+
+/**
  * Send a Ping request to keep the connection alive.
  * Must be sent periodically if the connection is idle.
  *
